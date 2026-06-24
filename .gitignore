@@ -216,3 +216,33 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# ── GAA project-specific ──────────────────────────────────────────────
+# Model weights / checkpoints (large binaries)
+checkpoints/
+*.bin
+*.safetensors
+*.pth
+*.gguf
+
+# Hugging Face cache / downloaded models
+hf_cache/
+.cache/
+
+# Generated dataset artifacts (regenerate via gaa/sds_reformat.py, smd_to_gaa.py, sds_old_to_gaa.py)
+data/*.json
+
+# Experiment outputs
+results/
+logs/
+runs/
+wandb/
+gaa_attn_viz*/
+
+# OMC / editor / misc
+.omc/
+.claude/
+
+# IDE
+.idea/
+.vscode/
