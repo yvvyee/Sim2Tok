@@ -132,6 +132,7 @@ class VisionLanguageModelV2(nn.Module):
             attn_i  = attention_mask[i] # (L,)
             img_i   = image_features[i] # (N, D)
             lbl_i   = labels[i] if labels is not None else None
+            lbl     = None  # initialize before branches to avoid UnboundLocalError
 
             # Find <image> position
             img_positions = (ids_i == image_token_id).nonzero(as_tuple=True)[0]
