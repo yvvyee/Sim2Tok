@@ -51,7 +51,8 @@ from PIL import Image
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data import Dataset, DataLoader, DistributedSampler
 
-from gaa.geo_losses import VARIANTS, compute_geo_loss_from_attn
+from gaa.geometric_loss import compute_geometric_mask
+from gaa.geo_losses import VARIANTS, extract_cls_attn, geo_loss
 
 DTYPES = {"float32": torch.float32, "float16": torch.float16,
           "bfloat16": torch.bfloat16}
@@ -203,6 +204,8 @@ def main():
               f"dtype={args.dtype} seed={args.seed}", flush=True)
 
     skipped: Counter[str] = Counter()
+    fg_patch_sum = 0.0
+    fg_patch_n = 0
     history: list[dict] = []
     step = 0
     t0 = time.time()
@@ -219,10 +222,37 @@ def main():
                 continue
             pv = pv.to(device=device, dtype=dtype, non_blocking=True)
 
+            # The mask is built here rather than inside
+            # compute_geo_loss_from_attn so that empty masks can be counted.
+            # A box smaller than tau of a patch cell produces an all-zero mask;
+            # inbox_ce then normalises a zero target and returns a loss with no
+            # gradient, so the sample trains nothing while the epoch counter
+            # advances. On the AIVN corpus at tau=0.5 that is 88% of samples,
+            # which a run must report rather than absorb.
+            fg = compute_geometric_mask(boxes, feature_size, device, args.geo_tau)
+            fg_per_sample = fg.flatten(1).sum(dim=1)
+            keep = fg_per_sample > 0
+            n_empty = int((~keep).sum().item())
+            if n_empty:
+                skipped["empty_mask"] += n_empty
+            if not bool(keep.any()):
+                skipped["all_empty_batch"] += 1
+                opt.zero_grad(set_to_none=True)
+                continue
+            fg_patch_sum += float(fg_per_sample[keep].sum().item())
+            fg_patch_n += int(keep.sum().item())
+
             out = model(pixel_values=pv, output_attentions=True)
-            loss = compute_geo_loss_from_attn(
-                args.variant, out.attentions[-1], boxes,
-                feature_size=feature_size, tau=args.geo_tau, margin=args.margin)
+            cls_attn = extract_cls_attn(out.attentions[-1], feature_size)
+            # Samples with an empty mask are dropped from the average rather
+            # than left in it.  ``geo_loss`` means over the batch, and an empty
+            # mask normalises to an all-zero target whose cross-entropy is
+            # exactly 0, so leaving those samples in would scale both loss and
+            # gradient by the fraction that happened to have a box large enough
+            # to survive tau.  The single-sample loop in the submitted work
+            # skips them outright, so dropping them keeps the two equivalent.
+            loss = geo_loss(args.variant, cls_attn[keep].float(),
+                            fg[keep].float(), margin=args.margin)
             if not torch.isfinite(loss):
                 skipped["non_finite_loss"] += 1
                 opt.zero_grad(set_to_none=True)
@@ -289,6 +319,13 @@ def main():
             "wall_seconds": round(time.time() - t0, 1),
             "history": history,
             "skipped": dict(skipped),
+            "n_empty_mask_samples": skipped.get("empty_mask", 0),
+            "empty_mask_fraction": round(
+                skipped.get("empty_mask", 0)
+                / max(args.epochs * len(dataset), 1), 6),
+            "mean_fg_patches_when_nonempty": (
+                round(fg_patch_sum / fg_patch_n, 3) if fg_patch_n else 0.0),
+            "feature_grid_cells": feature_size * feature_size,
         }
         with open(os.path.join(args.output_dir, "train_meta.json"), "w") as f:
             json.dump(meta, f, indent=2)
