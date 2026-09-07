@@ -28,6 +28,14 @@ so the ``tau`` rule matches training exactly.  Note that the function
 thresholds *patch coverage* rather than textbook IoU, as its own comment
 records; this evaluator inherits that definition on purpose.
 
+``--box_geometry`` selects the coordinate frame the boxes are laid on.  ``raw``
+normalises against the whole source frame, which is what the submitted pipeline
+does, so its numbers are the paper-comparable ones.  ``cropped`` maps boxes
+into the centre crop the encoder actually receives and drops the ones that fall
+outside it; on the 288-frame evaluation set that is 42% of boxes.  The default
+is ``raw`` on purpose: silently switching would make new numbers incomparable
+with the submitted ones, and the two must never share a table.
+
 Memory note: ``output_attentions=True`` materialises the attention tensor for
 every layer, which is ``24 x B x 16 x 577^2`` floats for CLIP-ViT-L/14-336
 (about 0.5 GB per unit of batch in float32).  ``--batch_size 16`` needs roughly
@@ -58,6 +66,7 @@ from PIL import Image
 from torch.utils.data import Dataset, DataLoader
 
 from gaa.geometric_loss import compute_geometric_mask
+from additional.box_geometry import transform_boxes
 from additional.stats import video_of
 
 DTYPES = {"float32": torch.float32, "float16": torch.float16,
@@ -198,6 +207,17 @@ def parse_args():
                         "Repeatable.")
     p.add_argument("--vision_model", default="openai/clip-vit-large-patch14-336")
     p.add_argument("--geo_tau", type=float, default=0.5)
+    p.add_argument("--box_geometry", default="raw", choices=["raw", "cropped"],
+                   help="'raw' normalises boxes against the whole frame, which "
+                        "is what the submitted pipeline does and what its "
+                        "numbers are comparable with. 'cropped' maps boxes "
+                        "into the centre crop the encoder actually sees and "
+                        "drops boxes that fall outside it; see crop_audit for "
+                        "how many that is. Never mix the two in one table.")
+    p.add_argument("--image_w", type=int, default=1920,
+                   help="source frame width, used only by --box_geometry cropped")
+    p.add_argument("--image_h", type=int, default=1080,
+                   help="source frame height, used only by --box_geometry cropped")
     p.add_argument("--feature_size", type=int, default=-1)
     p.add_argument("--batch_size", type=int, default=16)
     p.add_argument("--num_workers", type=int, default=8)
@@ -257,8 +277,13 @@ def main():
                 continue
             pv = pv.to(device=device, dtype=dtype, non_blocking=True)
             attn = cls_attention(model, pv, feature_size)
-            fg = compute_geometric_mask([m["bboxes"] for m in metas],
-                                        feature_size, device, args.geo_tau)
+            if args.box_geometry == "cropped":
+                boxes = [transform_boxes(m["bboxes"], args.image_w,
+                                         args.image_h) for m in metas]
+            else:
+                boxes = [m["bboxes"] for m in metas]
+            fg = compute_geometric_mask(boxes, feature_size, device,
+                                        args.geo_tau)
             m = batch_metrics(attn, fg)
             iou = m["attn_iou"].tolist()
             inbox = m["attn_in_box"].tolist()
@@ -311,6 +336,8 @@ def main():
             "image_dir": args.image_dir,
             "vision_model": args.vision_model,
             "geo_tau": args.geo_tau,
+            "box_geometry": args.box_geometry,
+            "source_image_size": [args.image_w, args.image_h],
             "feature_size": feature_size,
             "dtype": args.dtype,
             "batch_size": args.batch_size,

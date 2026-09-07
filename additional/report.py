@@ -26,11 +26,10 @@ from __future__ import annotations
 import argparse
 import json
 import os
-from collections import Counter
 
-from additional.stats import (clopper_pearson, fisher_exact_2x2,
-                              cluster_bootstrap_mean,
-                              cluster_bootstrap_paired_diff, video_of)
+from additional.stats import (clopper_pearson, cluster_bootstrap_mean,
+                              cluster_bootstrap_paired_diff,
+                              cluster_proportion, fisher_exact_2x2)
 
 
 # ── Loading ──────────────────────────────────────────────────────────────────
@@ -66,10 +65,6 @@ def find_per_sample(results_root: str, run_dir: str) -> dict[str, list[dict]]:
 
 def fmt_est(est) -> str:
     return f"{est.point:.4f} [{est.lo:.4f}, {est.hi:.4f}]"
-
-
-def fmt_rate(p) -> str:
-    return f"{p.k}/{p.n} = {p.point * 100:.4f}% [{p.lo * 100:.4f}%, {p.hi * 100:.4f}%]"
 
 
 def attn_table(runs: dict[str, list[dict]], groups: list[tuple[str, str]]) -> list[str]:
