@@ -185,18 +185,51 @@ def section_controls(root: str) -> list[str]:
 
 
 def section_scaling(root: str) -> list[str]:
-    """New evidence: does the gain hold as the training corpus grows?"""
-    L = ["## 추가 근거. 학습 규모에 따른 정렬", "",
-         "논문은 264 샘플에서만 측정했다. 같은 목적함수로 코퍼스를 늘렸을 때의 변화다.", ""]
-    runs = find_per_sample(root, "sweep_scaling")
-    if not runs:
-        return L + ["결과 대기 중입니다.", ""]
+    """New evidence: does the gain hold as the training corpus grows?
+
+    Reported per tau, because the AIVN corpus interacts with tau far more
+    strongly than the paper's pool did: at tau=0.5 the foreground mask is empty
+    for 88.22% of its samples, so most of the corpus carries no training signal
+    at all.  A single curve would hide that.
+    """
+    L = ["## 추가 근거. 학습 규모와 tau에 따른 정렬", "",
+         "논문은 264 샘플, tau=0.5에서만 측정했다. 신규 코퍼스는 선박이 훨씬 작아 "
+         "tau에 대한 의존이 크다. tau=0.5에서 1만개 중 88.22%가 전경 마스크가 비고, "
+         "그 샘플은 기울기를 만들지 않는다. 따라서 tau별로 나누어 보고한다.", ""]
+
+    blocks = [("sweep_scaling_fix_t001", "tau=0.01 (빈 마스크 0%)"),
+              ("sweep_scaling_fix_t05", "tau=0.5 (논문 기본값, 빈 마스크 88%)"),
+              ("sweep_scaling", "초기 측정 (빈 마스크가 배치 평균을 희석한 판)")]
     order = ["stock", "n264", "n1000", "n3000", "n10000"]
-    runs = {k: runs[k] for k in order if k in runs} | \
-           {k: v for k, v in runs.items() if k not in order}
-    L += ["측정: 비디오당 60프레임 부표본(3,540 프레임, 59 비디오).", ""]
-    L += attn_table(runs, [("all", "")])
-    L.append("")
+    any_found = False
+    for run_dir, title in blocks:
+        runs = find_per_sample(root, run_dir)
+        if not runs:
+            continue
+        any_found = True
+        runs = ({k: runs[k] for k in order if k in runs}
+                | {k: v for k, v in runs.items() if k not in order})
+        L += [f"### {title}", "",
+              "측정: 비디오당 60프레임 부표본(3,540 프레임, 59 비디오).", ""]
+        L += attn_table(runs, [("all", "")])
+        L.append("")
+
+    if not any_found:
+        return L + ["결과 대기 중입니다.", ""]
+
+    ts = load_json(os.path.join(root, "train_summary.json"))
+    if ts:
+        L += ["학습 기록:", "",
+              "| 이름 | n | 스텝 | 초 | 최종 loss | 빈 마스크 | 전경 패치 평균 |",
+              "|---|---|---|---|---|---|---|"]
+        for m in ts:
+            L.append(f"| {m['name']} | {m.get('n_samples', 0):,} | "
+                     f"{m.get('total_steps', 0):,} | "
+                     f"{m.get('wall_seconds', 0):.0f} | "
+                     f"{m.get('final_loss', float('nan')):.4f} | "
+                     f"{m.get('n_empty_mask_samples', '—')} | "
+                     f"{m.get('mean_fg_patches_when_nonempty', '—')} |")
+        L.append("")
     return L
 
 
@@ -331,6 +364,38 @@ def section_detector(root: str) -> list[str]:
     return L
 
 
+def section_geometry(root: str) -> list[str]:
+    """A measured property of the pipeline that bounds how the numbers read."""
+    L = ["## 측정 조건. 전처리가 정답 상자에 하는 일", "",
+         "CLIP-ViT-L/14-336 전처리는 짧은 변을 336으로 맞춘 뒤 336x336 중앙 크롭을 "
+         "한다. 1920x1080 프레임에서는 가로 정규화 대역 [0.2188, 0.7812]만 남고 "
+         "43.75%가 버려진다. 표시 열을 전처리에 통과시켜 실측 확인했다.", "",
+         "상자는 전체 프레임 기준으로 정규화되어 격자에 그대로 올라가므로, 잘려나간 "
+         "영역의 상자는 인코더가 볼 수 없는 곳을 가리키고 남은 상자도 늘어난 대역 "
+         "때문에 어긋난 열에 놓인다. 이는 제출본의 평가 경로에서 물려받은 성질이며, "
+         "비교 가능성을 위해 기본 동작을 바꾸지 않았다.", ""]
+    found = False
+    L += ["| 데이터셋 | 프레임 | 박스 | 완전히 잘림 | 일부 잘림 | 온전 | 중심 오차(격자칸) |",
+          "|---|---|---|---|---|---|---|"]
+    for name, label in (("smd_full", "SMD 전량"),
+                        ("smd_onshore_big", "SMD 288 (제출본 평가셋)"),
+                        ("aivn_10k_describe", "AIVN 1만개 (학습)")):
+        r = load_json(os.path.join(root, f"crop_audit_{name}.json"))
+        if not r:
+            continue
+        found = True
+        cells = r["mean_centre_placement_error"] * 24
+        L.append(f"| {label} | {r['n_frames']:,} | {r['n_boxes']:,} | "
+                 f"{r['boxes_fully_outside']:,} "
+                 f"({r['boxes_fully_outside_pct']}%) | "
+                 f"{r['boxes_partly_outside']:,} | "
+                 f"{r['boxes_fully_inside']:,} | {cells:.1f} |")
+    if not found:
+        return L[:-2] + ["결과 대기 중입니다.", ""]
+    L.append("")
+    return L
+
+
 def parse_args():
     p = argparse.ArgumentParser("assemble the additional-experiment report")
     p.add_argument("--results_root", required=True)
@@ -351,9 +416,9 @@ def main():
          "좁아지지 않는다.", "",
          f"결과 원본: `{root}`", "", "---", ""]
 
-    for fn in (section_alignment, section_controls, section_scaling,
-               section_halluc, section_colregs, section_cross_arch,
-               section_detector):
+    for fn in (section_geometry, section_alignment, section_controls,
+               section_scaling, section_halluc, section_colregs,
+               section_cross_arch, section_detector):
         L += fn(root)
         L += ["---", ""]
 
