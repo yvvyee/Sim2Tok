@@ -176,6 +176,15 @@ def section_controls(root: str) -> list[str]:
     L += attn_table(runs, [("all", "")])
     L.append("")
 
+    if stock:
+        L += ["stock 대비 짝지은 차이(같은 프레임을 두 인코더로 채점). "
+              "구간이 0을 포함하지 않으면 그 방향의 차이가 데이터로 구분된다:", ""]
+        for label in runs:
+            if label == "stock":
+                continue
+            L.append(f"- {paired_row(stock, runs[label], 'stock', label)}")
+        L.append("")
+
     sweep = find_per_sample(root, "sweep_variants")
     if sweep:
         L += ["1만개 규모에서 손실 변형을 다시 학습한 결과(비디오당 60프레임 부표본):", ""]
