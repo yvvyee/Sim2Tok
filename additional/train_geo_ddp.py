@@ -232,32 +232,55 @@ def main():
             fg = compute_geometric_mask(boxes, feature_size, device, args.geo_tau)
             fg_per_sample = fg.flatten(1).sum(dim=1)
             keep = fg_per_sample > 0
-            n_empty = int((~keep).sum().item())
+            n_valid = int(keep.sum().item())
+            n_empty = int(keep.numel() - n_valid)
             if n_empty:
                 skipped["empty_mask"] += n_empty
-            if not bool(keep.any()):
+            if n_valid == 0:
                 skipped["all_empty_batch"] += 1
-                opt.zero_grad(set_to_none=True)
-                continue
-            fg_patch_sum += float(fg_per_sample[keep].sum().item())
-            fg_patch_n += int(keep.sum().item())
+            else:
+                fg_patch_sum += float(fg_per_sample[keep].sum().item())
+                fg_patch_n += n_valid
 
             out = model(pixel_values=pv, output_attentions=True)
             cls_attn = extract_cls_attn(out.attentions[-1], feature_size)
-            # Samples with an empty mask are dropped from the average rather
-            # than left in it.  ``geo_loss`` means over the batch, and an empty
-            # mask normalises to an all-zero target whose cross-entropy is
-            # exactly 0, so leaving those samples in would scale both loss and
-            # gradient by the fraction that happened to have a box large enough
-            # to survive tau.  The single-sample loop in the submitted work
-            # skips them outright, so dropping them keeps the two equivalent.
-            loss = geo_loss(args.variant, cls_attn[keep].float(),
-                            fg[keep].float(), margin=args.margin)
+
+            # Empty-mask samples must not contribute, but a rank must never
+            # skip the step.  An empty mask normalises to an all-zero target
+            # whose cross-entropy is exactly 0, so those samples carry no
+            # signal; dropping them from the average is what the submitted
+            # single-sample loop does.  Skipping the whole step when a batch
+            # happens to hold none, however, desynchronises DDP: ranks then run
+            # different numbers of collectives and the run dies with a
+            # DistBackendError, which is what the AIVN corpus at tau=0.5 did,
+            # where 88% of samples have an empty mask.
+            #
+            # So every rank always runs backward.  A rank with no valid sample
+            # builds a graph-connected zero, contributing zero gradient without
+            # leaving the collective.  The loss is summed rather than averaged
+            # locally and rescaled by the global valid count, so the gradient
+            # DDP produces is the mean over valid samples across all ranks
+            # rather than a per-rank mean of unequal batches.
+            if n_valid > 0:
+                local_mean = geo_loss(args.variant, cls_attn[keep].float(),
+                                      fg[keep].float(), margin=args.margin)
+                loss_sum = local_mean * n_valid
+                report = float(local_mean.item())
+            else:
+                loss_sum = cls_attn.float().sum() * 0.0
+                report = 0.0
+
+            if distributed:
+                counter = torch.tensor([float(n_valid)], device=device)
+                dist.all_reduce(counter)
+                denom = float(counter.item())
+            else:
+                denom = float(n_valid)
+
+            loss = loss_sum * (world / max(denom, 1.0)) * args.lam
             if not torch.isfinite(loss):
                 skipped["non_finite_loss"] += 1
-                opt.zero_grad(set_to_none=True)
-                continue
-            loss = loss * args.lam
+                loss = cls_attn.float().sum() * 0.0
 
             opt.zero_grad(set_to_none=True)
             loss.backward()
@@ -266,8 +289,15 @@ def main():
             opt.step()
             sched.step()
 
-            run_loss += loss.item()
-            run_n += 1
+            # Reported separately from the scaled training loss.  The training
+            # loss carries the global-valid-count rescaling that keeps DDP's
+            # gradient a mean over valid samples; accumulating that value would
+            # not give a readable per-sample number.  These two accumulate the
+            # local sum and the local valid count, so the epoch-end all_reduce
+            # divides one by the other and yields the mean over every valid
+            # sample seen by every rank.
+            run_loss += report * n_valid
+            run_n += n_valid
             step += 1
 
             if rank == 0 and step % args.log_every == 0:
@@ -279,14 +309,31 @@ def main():
                 break
 
         epoch_loss = run_loss / max(run_n, 1)
+        n_valid_epoch = run_n
         if distributed:
             t = torch.tensor([run_loss, float(run_n)], device=device)
             dist.all_reduce(t)
             epoch_loss = (t[0] / t[1].clamp(min=1)).item()
+            n_valid_epoch = int(t[1].item())
+        # A desynchronised step count is what a rank-dependent ``continue``
+        # produces, and NCCL reports it only as a DistBackendError from deep
+        # inside the collective.  Checking it here names the cause instead.
+        if distributed:
+            counts = torch.tensor([float(step)], device=device)
+            lo = counts.clone()
+            dist.all_reduce(counts, op=dist.ReduceOp.MAX)
+            dist.all_reduce(lo, op=dist.ReduceOp.MIN)
+            if counts.item() != lo.item():
+                raise RuntimeError(
+                    f"rank step counts diverged: min {lo.item():.0f} vs max "
+                    f"{counts.item():.0f}. Every rank must run the same number "
+                    f"of backward passes or DDP collectives desynchronise.")
         if rank == 0:
-            history.append({"epoch": epoch + 1, "loss": epoch_loss, "steps": step})
+            history.append({"epoch": epoch + 1, "loss": epoch_loss,
+                            "steps": step, "n_valid_samples": n_valid_epoch})
             print(f"[train] epoch {epoch + 1}/{args.epochs} "
-                  f"loss={epoch_loss:.4f} steps={step}", flush=True)
+                  f"loss={epoch_loss:.4f} steps={step} "
+                  f"유효샘플={n_valid_epoch}", flush=True)
         if stop:
             break
 

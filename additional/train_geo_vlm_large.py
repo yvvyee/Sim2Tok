@@ -170,14 +170,27 @@ def train(encoder, proc, family, img_size, feature_size, samples, args,
 
 @torch.no_grad()
 def evaluate(encoder, proc, family, img_size, feature_size, samples, args,
-             device, dtype) -> tuple[dict, list[dict]]:
-    """Per-sample alignment on the evaluation set, with a video-level interval."""
+             device, dtype, tag: str = "") -> tuple[dict, list[dict]]:
+    """Per-sample alignment on the evaluation set, with a video-level interval.
+
+    Progress is logged.  The families here disagree on preprocessing, so this
+    loop runs one image at a time; without a heartbeat a slow model and a hung
+    model look identical from the outside, which is how a multi-hour sweep ends
+    up with no diagnosis.
+    """
     from additional.stats import cluster_bootstrap_mean
 
     encoder.eval()
     records: list[dict] = []
     fails: Counter[str] = Counter()
-    for s in samples:
+    t_eval = time.time()
+    for n_seen, s in enumerate(samples, 1):
+        if args.log_every and n_seen % args.log_every == 0:
+            done = time.time() - t_eval
+            rate = n_seen / max(done, 1e-9)
+            print(f"  eval{tag} {n_seen}/{len(samples)}  {rate:.1f} img/s  "
+                  f"남은 예상 {(len(samples) - n_seen) / max(rate, 1e-9):.0f}s",
+                  flush=True)
         try:
             image = Image.open(s["path"]).convert("RGB")
         except (OSError, ValueError):
@@ -265,14 +278,15 @@ def main():
     if args.eval_before:
         before, before_recs = evaluate(encoder, proc, family, img_size,
                                        feature_size, eval_samples, args,
-                                       device, dtype)
+                                       device, dtype, tag="[before]")
         print(f"[xarch] before: {before.get('attn_iou', {}).get('point')}",
               flush=True)
 
     stats = train(encoder, proc, family, img_size, feature_size,
                   train_samples, args, device, dtype)
     after, after_recs = evaluate(encoder, proc, family, img_size, feature_size,
-                                 eval_samples, args, device, dtype)
+                                 eval_samples, args, device, dtype,
+                                 tag="[after]")
 
     ckpt = os.path.join(args.output_dir, "vision_encoder.bin")
     torch.save(encoder.state_dict(), ckpt)
