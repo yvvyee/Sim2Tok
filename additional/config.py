@@ -57,6 +57,54 @@ def cuda_env(devices: tuple[int, ...] | None = None,
     return env
 
 
+def assert_policy_or_die(devices: tuple[int, ...] | None = None) -> None:
+    """Abort unless every visible GPU is one this study may use.
+
+    ``cuda_visible_devices`` only builds the mask; it cannot stop a process
+    that was launched without it.  A command copied from a docstring without
+    its ``CUDA_VISIBLE_DEVICES`` prefix would map local rank 0 straight onto
+    physical GPU 0, allocate several GB there and very likely take down another
+    user's job, with no error of its own.  This resolves the UUID of every
+    device the process can actually see and refuses to continue if any of them
+    is reserved, so the guarantee does not depend on how the process started.
+    """
+    import subprocess
+
+    import torch
+
+    allowed = tuple(devices) if devices is not None else CUDA_DEVICES
+    cuda_visible_devices(allowed)          # rejects a reserved index outright
+    if not torch.cuda.is_available():
+        raise RuntimeError("no CUDA device is available")
+
+    out = subprocess.run(
+        ["nvidia-smi", "--query-gpu=index,uuid", "--format=csv,noheader"],
+        capture_output=True, text=True, check=True).stdout
+    physical = {}
+    for line in out.strip().splitlines():
+        idx, uuid = (p.strip() for p in line.split(",", 1))
+        physical[int(idx)] = uuid.replace("GPU-", "")
+    reserved = {physical[i]: i for i in sorted(RESERVED_DEVICES) if i in physical}
+    permitted = {physical[i] for i in allowed if i in physical}
+
+    for i in range(torch.cuda.device_count()):
+        u = getattr(torch.cuda.get_device_properties(i), "uuid", None)
+        if u is None:
+            raise RuntimeError(
+                "this torch build does not expose device UUIDs, so the GPU "
+                "policy cannot be verified; refusing to run")
+        u = str(u).replace("GPU-", "")
+        if u in reserved:
+            raise RuntimeError(
+                f"local device {i} is physical GPU {reserved[u]}, which is "
+                f"reserved for other users. Set CUDA_VISIBLE_DEVICES="
+                f"{cuda_visible_devices(allowed)} before launching.")
+        if u not in permitted:
+            raise RuntimeError(
+                f"local device {i} (uuid {u}) is not among the allowed cards "
+                f"{list(allowed)}")
+
+
 def nproc_per_node(devices: tuple[int, ...] | None = None) -> int:
     """Number of ranks for a torchrun launch over the allowed GPU set."""
     devs = tuple(devices) if devices is not None else CUDA_DEVICES

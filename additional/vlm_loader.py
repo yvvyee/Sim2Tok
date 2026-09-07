@@ -53,28 +53,61 @@ def build_vlm(vlm_ckpt: str, llm: str, vision_model: str,
     return model.to(device).eval()
 
 
-def swap_encoder(model, ckpt: str | None) -> dict:
-    """Overlay vision-encoder weights on the frozen tower.
+def snapshot_encoder(model) -> dict:
+    """A CPU copy of the tower's weights, to restore the stock condition.
 
-    Returns a load report.  ``None`` or ``"none"`` keeps whatever encoder the
-    checkpoint directory already loaded, which is the stock-encoder condition.
+    ``build_vlm`` is called once and every ``--encoder`` pass mutates that one
+    model in place, so the "stock" condition is only stock if the weights are
+    put back.  Without this, ``--encoder gaa=... --encoder stock=none`` would
+    measure the GAA tower twice and label one of the rows stock, and the two
+    rows would agree perfectly -- which a reader would take as evidence that
+    the encoder cannot influence the answer at all.
     """
+    return {k: v.detach().cpu().clone()
+            for k, v in model.vision_encoder.model.state_dict().items()}
+
+
+def swap_encoder(model, ckpt: str | None, stock_state: dict | None = None,
+                 min_match_ratio: float = 0.99) -> dict:
+    """Set the frozen tower's weights for one measurement condition.
+
+    ``None`` or ``"none"`` restores ``stock_state``, which is the stock
+    condition.  Passing no snapshot for that case is refused rather than
+    silently leaving a previous swap in place.
+
+    A checkpoint that matches only part of the tower is refused too.  Checking
+    only for zero matches would let a truncated or partial-layer save through,
+    and the run would then report a number for an encoder that is mostly stock
+    weights under a label saying otherwise.
+    """
+    target = model.vision_encoder.model
+
     if not ckpt or ckpt.lower() in ("none", ""):
-        return {"ckpt": None, "matched": 0, "total": 0}
+        if stock_state is None:
+            raise ValueError(
+                "the stock condition needs a snapshot taken before any swap; "
+                "call snapshot_encoder(model) once and pass it in")
+        target.load_state_dict(stock_state, strict=True)
+        return {"ckpt": None, "restored_stock": True,
+                "matched": len(stock_state), "total": len(stock_state)}
+
     if not os.path.exists(ckpt):
         raise FileNotFoundError(f"encoder checkpoint not found: {ckpt}")
 
     state = torch.load(ckpt, map_location="cpu", weights_only=True)
     if state and all(k.startswith("model.") for k in state):
         state = {k[len("model."):]: v for k, v in state.items()}
-    missing, unexpected = model.vision_encoder.model.load_state_dict(
-        state, strict=False)
+    missing, unexpected = target.load_state_dict(state, strict=False)
     matched = len(state) - len(unexpected)
-    if matched == 0:
+    n_target = len(target.state_dict())
+    if matched < min_match_ratio * n_target:
         raise RuntimeError(
-            f"no vision weights matched from {ckpt}; the run would report a "
-            f"swapped encoder while measuring the stock one")
-    return {"ckpt": ckpt, "matched": matched, "total": len(state),
+            f"{ckpt} set only {matched} of the tower's {n_target} tensors "
+            f"({matched / max(n_target, 1):.1%}); the run would report this as "
+            f"a tuned encoder while most weights stayed stock. "
+            f"missing={len(missing)} unexpected={len(unexpected)}")
+    return {"ckpt": ckpt, "restored_stock": False, "matched": matched,
+            "total": len(state), "target_tensors": n_target,
             "missing": len(missing), "unexpected": len(unexpected)}
 
 

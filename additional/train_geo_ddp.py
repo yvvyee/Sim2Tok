@@ -51,6 +51,7 @@ from PIL import Image
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data import Dataset, DataLoader, DistributedSampler
 
+from additional.config import assert_policy_or_die
 from gaa.geometric_loss import compute_geometric_mask
 from gaa.geo_losses import VARIANTS, extract_cls_attn, geo_loss
 
@@ -155,6 +156,7 @@ def main():
     device = torch.device("cuda", local_rank)
     dtype = DTYPES[args.dtype]
     seed_everything(args.seed, rank)
+    assert_policy_or_die()
 
     from transformers import CLIPVisionModel, CLIPImageProcessor, CLIPVisionConfig
 
@@ -337,6 +339,29 @@ def main():
         if stop:
             break
 
+    # Counters are rank-local while the dataset length is global, so writing
+    # rank 0's numerator over a global denominator understates every fraction
+    # by exactly world_size: at 4 ranks the tau=0.5 empty-mask rate would be
+    # filed as 22% when it is 88%. Reduce them before anyone reads them.
+    tally_keys = ["empty_mask", "all_empty_batch", "unreadable_batch",
+                  "non_finite_loss"]
+    if distributed:
+        tally = torch.tensor(
+            [float(skipped.get(k, 0)) for k in tally_keys]
+            + [fg_patch_sum, float(fg_patch_n), float(step)], device=device)
+        dist.all_reduce(tally)
+        vals = tally.tolist()
+        for i, k in enumerate(tally_keys):
+            if vals[i]:
+                skipped[k] = int(vals[i])
+            else:
+                skipped.pop(k, None)
+        fg_patch_sum = vals[len(tally_keys)]
+        fg_patch_n = int(vals[len(tally_keys) + 1])
+        steps_all_ranks = int(vals[len(tally_keys) + 2])
+    else:
+        steps_all_ranks = step
+
     if rank == 0:
         core = model.module if distributed else model
         core.eval()
@@ -367,9 +392,11 @@ def main():
             "history": history,
             "skipped": dict(skipped),
             "n_empty_mask_samples": skipped.get("empty_mask", 0),
+            "n_samples_consumed": steps_all_ranks * args.per_device_batch,
             "empty_mask_fraction": round(
                 skipped.get("empty_mask", 0)
-                / max(args.epochs * len(dataset), 1), 6),
+                / max(steps_all_ranks * args.per_device_batch, 1), 6),
+            "counters_are_global": distributed,
             "mean_fg_patches_when_nonempty": (
                 round(fg_patch_sum / fg_patch_n, 3) if fg_patch_n else 0.0),
             "feature_grid_cells": feature_size * feature_size,

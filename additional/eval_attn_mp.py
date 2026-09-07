@@ -67,6 +67,7 @@ from torch.utils.data import Dataset, DataLoader
 
 from gaa.geometric_loss import compute_geometric_mask
 from additional.box_geometry import transform_boxes
+from additional.config import assert_policy_or_die
 from additional.stats import video_of
 
 DTYPES = {"float32": torch.float32, "float16": torch.float16,
@@ -242,6 +243,7 @@ def main():
     torch.cuda.set_device(local_rank)
     device = torch.device("cuda", local_rank)
     dtype = DTYPES[args.dtype]
+    assert_policy_or_die()
 
     with open(args.data_path) as f:
         samples = json.load(f)

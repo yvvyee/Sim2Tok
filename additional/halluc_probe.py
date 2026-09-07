@@ -53,8 +53,10 @@ import torch.distributed as dist
 from PIL import Image
 from torch.utils.data import Dataset, DataLoader
 
+from additional.config import assert_policy_or_die
 from additional.stats import video_of
-from additional.vlm_loader import build_vlm, swap_encoder, uniform_prompt
+from additional.vlm_loader import (build_vlm, snapshot_encoder,
+                                   swap_encoder, uniform_prompt)
 
 DTYPES = {"float32": torch.float32, "float16": torch.float16,
           "bfloat16": torch.bfloat16}
@@ -187,6 +189,7 @@ def main():
     torch.cuda.set_device(local_rank)
     device = torch.device("cuda", local_rank)
     dtype = DTYPES[args.dtype]
+    assert_policy_or_die()
 
     with open(args.data_path) as f:
         samples = json.load(f)
@@ -209,13 +212,16 @@ def main():
     model = build_vlm(args.vlm_ckpt, args.llm, args.vision_model,
                       args.projector_type, dtype, device)
     tokenizer = model.tokenizer
+    # Taken before any swap: every --encoder pass mutates this one model in
+    # place, so the stock condition is only stock if the weights are restored.
+    stock_state = snapshot_encoder(model)
 
     summary: dict[str, dict] = {}
     for spec in args.encoder:
         if "=" not in spec:
             raise SystemExit(f"--encoder needs LABEL=PATH, got {spec!r}")
         label, path = spec.split("=", 1)
-        report = swap_encoder(model, path)
+        report = swap_encoder(model, path, stock_state=stock_state)
         processor = model.vision_encoder.image_processor
         loader = DataLoader(FrameOnly(shard, args.image_dir, processor),
                             batch_size=args.batch_size, shuffle=False,

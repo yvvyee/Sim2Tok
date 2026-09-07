@@ -56,6 +56,7 @@ def audit(samples: list[dict], image_w: int, image_h: int) -> dict:
     span = hi - lo
 
     n_box = 0
+    n_scored = 0
     outside = 0
     partial = 0
     inside = 0
@@ -75,16 +76,23 @@ def audit(samples: list[dict], image_w: int, image_h: int) -> dict:
             if c <= lo or a >= hi:
                 outside += 1
                 f_out += 1
-            elif a < lo or c > hi:
+                # No placement error is defined for a box the encoder cannot
+                # see at all: its "correct" position would be negative or past
+                # one.  Averaging those in would inflate the statistic with the
+                # very boxes the neighbouring column already reports as unseen,
+                # and the inflated mean would then be quoted as how far the
+                # *surviving* boxes sit from where they appear.
+                continue
+            if a < lo or c > hi:
                 partial += 1
             else:
                 inside += 1
-            # Placement error at the box centre, in normalised grid units.
             mid = (a + c) / 2
             correct = (mid - lo) / span
             shift = abs(correct - mid)
             shift_sum += shift
             shift_max = max(shift_max, shift)
+            n_scored += 1
         if f_out == len(boxes):
             frames_all_outside += 1
         if f_out:
@@ -103,10 +111,13 @@ def audit(samples: list[dict], image_w: int, image_h: int) -> dict:
         "boxes_fully_outside_pct": round(100 * outside / max(n_box, 1), 3),
         "frames_with_any_box_outside": frames_any_outside,
         "frames_with_every_box_outside": frames_all_outside,
-        "mean_centre_placement_error": round(shift_sum / max(n_box, 1), 4),
-        "max_centre_placement_error": round(shift_max, 4),
-        "note": ("placement error is in normalised units on the cropped axis; "
-                 "0.0417 equals one patch column of a 24-wide grid"),
+        "n_boxes_scored_for_placement": n_scored,
+        "mean_centre_placement_error_surviving": round(
+            shift_sum / max(n_scored, 1), 4),
+        "max_centre_placement_error_surviving": round(shift_max, 4),
+        "note": ("placement error is in normalised units on the cropped axis "
+                 "and is averaged over surviving boxes only (inside + partly "
+                 "outside); 0.0417 equals one patch column of a 24-wide grid"),
     }
 
 
@@ -135,8 +146,9 @@ def main():
     print(f"  온전히 남은 박스     {r['boxes_fully_inside']:,}")
     print(f"  박스가 하나라도 잘린 프레임 {r['frames_with_any_box_outside']:,}")
     print(f"  모든 박스가 잘린 프레임     {r['frames_with_every_box_outside']:,}")
-    print(f"  중심 배치 오차 평균 {r['mean_centre_placement_error']} "
-          f"(최대 {r['max_centre_placement_error']}), "
+    print(f"  중심 배치 오차 평균 {r['mean_centre_placement_error_surviving']} "
+          f"(최대 {r['max_centre_placement_error_surviving']}), "
+          f"생존 박스 {r['n_boxes_scored_for_placement']:,}개 기준, "
           f"24칸 격자에서 1칸 = 0.0417")
 
     if args.out_json:
