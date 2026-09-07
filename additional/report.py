@@ -299,6 +299,54 @@ def section_halluc(root: str) -> list[str]:
     return L
 
 
+def section_culprit(root: str) -> list[str]:
+    """C1: does training on low-alignment examples produce more hallucination?"""
+    L = ["## C1 직접 검증. 시각적 범인 분할", "",
+         "논문은 학습 풀 264쌍을 Attn-IoU 기준으로 low 127 / high 127로 나눠 각각 "
+         "인코더를 학습하고 환각률을 비교했다. 근거는 SDS 에피소드 100개 x 부재 물체 "
+         "3종 = 300 프로브였다. 여기서는 같은 두 인코더를 SMD 전량에서 정렬로 재고, "
+         "부재 프로브를 20 범주로 확장해 비교한다. 정렬과 환각을 같은 인코더 쌍에서 "
+         "재므로 주장의 두 항을 함께 볼 수 있다.", ""]
+
+    runs = find_per_sample(root, "full_smd_culprit")
+    stock = find_per_sample(root, "full_smd_stock").get("stock", [])
+    if runs:
+        if stock:
+            runs = {"stock": stock, **runs}
+        L += ["정렬 (SMD 전량):", ""]
+        L += attn_table(runs, [("all", "")])
+        L.append("")
+        lo, hi = runs.get("geo_low"), runs.get("geo_high")
+        if lo and hi:
+            L += [f"- {paired_row(lo, hi, 'geo_low', 'geo_high')}", ""]
+    else:
+        L += ["정렬: 결과 대기 중입니다.", ""]
+
+    s = load_json(os.path.join(root, "halluc_culprit", "summary.json"))
+    if not s:
+        return L + ["부재 프로브: 결과 대기 중입니다.", ""]
+    L += ["부재 프로브 (3,540 프레임 x 20 범주):", "",
+          "| 인코더 | 프로브 | 환각 | 비율 | 정확 이항 95% | 비디오 부트스트랩 95% |",
+          "|---|---|---|---|---|---|"]
+    for key, r in s.get("results", {}).items():
+        o = r.get("overall") or {}
+        ex, cb = o.get("exact_binomial", {}), o.get("cluster_bootstrap", {})
+        L.append(f"| {key} | {o.get('n', 0):,} | {o.get('k', 0)} | "
+                 f"{o.get('rate', 0) * 100:.4f}% | "
+                 f"[{ex.get('lo', 0) * 100:.4f}%, {ex.get('hi', 0) * 100:.4f}%] | "
+                 f"[{cb.get('lo', 0) * 100:.4f}%, {cb.get('hi', 0) * 100:.4f}%] |")
+    L.append("")
+    res = s.get("results", {})
+    a = next((v for k, v in res.items() if k.startswith("geo_low")), None)
+    b = next((v for k, v in res.items() if k.startswith("geo_high")), None)
+    if a and b:
+        ka, na = a["overall"]["k"], a["overall"]["n"]
+        kb, nb = b["overall"]["k"], b["overall"]["n"]
+        p = fisher_exact_2x2(ka, na - ka, kb, nb - kb)
+        L += [f"- low {ka}/{na} 대 high {kb}/{nb}, Fisher 정확검정 p = {p:.4g}", ""]
+    return L
+
+
 def section_colregs(root: str) -> list[str]:
     """The paper's own stated limitation, measured on exact labels."""
     L = ["## 한계 재검증. COLREGs 조우 상황 분류", "",
@@ -426,8 +474,8 @@ def main():
          f"결과 원본: `{root}`", "", "---", ""]
 
     for fn in (section_geometry, section_alignment, section_controls,
-               section_scaling, section_halluc, section_colregs,
-               section_cross_arch, section_detector):
+               section_scaling, section_halluc, section_culprit,
+               section_colregs, section_cross_arch, section_detector):
         L += fn(root)
         L += ["---", ""]
 
