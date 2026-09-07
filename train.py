@@ -60,6 +60,12 @@ def parse_args():
     # Phase 2: load pretrained projector
     p.add_argument("--projector_path", default=None,
                    help="Path to projector.bin from Phase 1 (required for lora/full)")
+    p.add_argument("--vision_encoder_path", default=None,
+                   help="Path to a vision_encoder.bin to overlay on the stock "
+                        "encoder before training. Used by the two-stage GAA "
+                        "recipe to carry the geometry-aligned encoder into the "
+                        "SFT stage; the encoder stays frozen either way. "
+                        "Omit to train on the stock encoder.")
 
     # Data
     p.add_argument("--data_path",  required=True,  help="chat.json path")
@@ -295,6 +301,33 @@ def main():
     )
 
     model = build_model(config, torch_dtype=dtype)
+
+    # ── Overlay a tuned vision encoder (two-stage GAA recipe) ─────────────────
+    # Stage 1 trains the encoder alone with L_geo; stage 2 must start from those
+    # weights or the alignment gain is simply absent from the SFT model.  The
+    # encoder is frozen (freeze_vision=True above), so this only changes which
+    # weights the frozen tower carries.  A checkpoint that matches nothing is an
+    # error rather than a warning: silently training on the stock encoder would
+    # produce a result labelled "two-stage" that never saw stage 1.
+    if args.vision_encoder_path:
+        print(f"[Train] Loading vision encoder weights from "
+              f"{args.vision_encoder_path}")
+        state = torch.load(args.vision_encoder_path, map_location="cpu",
+                           weights_only=True)
+        if state and all(k.startswith("model.") for k in state):
+            state = {k[len("model."):]: v for k, v in state.items()}
+        target = model.vision_encoder
+        inner = getattr(target, "model", None)
+        if inner is not None and any(k.startswith("vision_model.") for k in state):
+            target = inner
+        missing, unexpected = target.load_state_dict(state, strict=False)
+        matched = len(state) - len(unexpected)
+        print(f"[Train] vision encoder: matched {matched}/{len(state)} tensors "
+              f"(missing={len(missing)}, unexpected={len(unexpected)})")
+        if matched == 0:
+            raise RuntimeError(
+                f"no vision weights matched from {args.vision_encoder_path}; "
+                f"the run would silently train on the stock encoder")
 
     # ── Load pretrained projector (Phase 2) ───────────────────────────────────
     if args.projector_path:
