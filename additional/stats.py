@@ -186,9 +186,22 @@ def fisher_exact_2x2(a: int, b: int, c: int, d: int) -> float:
 
 # ── Cluster bootstrap ────────────────────────────────────────────────────────
 
+#: A cluster bootstrap needs clusters to resample.  Below this many, every
+#: draw repeats the same handful and the interval collapses toward zero width,
+#: which would print as a very precise estimate rather than an absent one.
+MIN_CLUSTERS = 3
+
+
 @dataclass(frozen=True)
 class Estimate:
-    """A point estimate with a bootstrap interval over clusters."""
+    """A point estimate with a bootstrap interval over clusters.
+
+    ``degenerate`` marks the case where there were too few clusters for the
+    interval to mean anything.  With one cluster the bootstrap draws it every
+    time and returns a zero-width range; formatted like any other it would read
+    as an exact measurement.  Callers should render such a row as having no
+    interval rather than a narrow one.
+    """
 
     point: float
     lo: float
@@ -197,25 +210,47 @@ class Estimate:
     n_items: int
     n_boot: int
     alpha: float
+    n_excluded_undefined: int = 0
+
+    @property
+    def degenerate(self) -> bool:
+        return self.n_clusters < MIN_CLUSTERS
 
     def as_dict(self) -> dict:
-        return asdict(self)
+        d = asdict(self)
+        d["degenerate"] = self.degenerate
+        return d
 
     def __str__(self) -> str:
         conf = int(round((1 - self.alpha) * 100))
+        if self.degenerate:
+            return (f"{self.point:.4f} (구간 미정의: 클러스터 "
+                    f"{self.n_clusters}개 < {MIN_CLUSTERS}, "
+                    f"{self.n_items} items)")
         return (f"{self.point:.4f} ({conf}% CI [{self.lo:.4f}, {self.hi:.4f}], "
                 f"{self.n_clusters} clusters / {self.n_items} items)")
 
 
-def _group(values, clusters) -> dict[str, list[float]]:
+def _group(values, clusters) -> tuple[dict[str, list[float]], int]:
+    """Cluster the finite values, and count what was left out.
+
+    A NaN means the metric was undefined for that sample, which for Attn-IoU is
+    a frame with no foreground patch.  Dropping those silently would hide a
+    systematically selected exclusion: at a high tau it is exactly the small
+    and distant vessels the claim is about.  The count is returned so it can be
+    reported.
+    """
     by: dict[str, list[float]] = {}
+    n_excluded = 0
     for v, g in zip(values, clusters):
-        if v is None or (isinstance(v, float) and math.isnan(v)):
+        if v is None or (isinstance(v, float)
+                         and (math.isnan(v) or math.isinf(v))):
+            n_excluded += 1
             continue
         by.setdefault(g, []).append(float(v))
     if not by:
-        raise ValueError("no finite values")
-    return by
+        raise ValueError(f"no finite values ({n_excluded} excluded)")
+    return by, n_excluded
 
 
 def _percentiles(draws: list[float], alpha: float) -> tuple[float, float]:
@@ -235,7 +270,7 @@ def cluster_bootstrap_mean(values, clusters, n_boot: int = 2000,
     cluster is kept.  The point estimate is the plain mean over all items, so it
     matches what a per-frame average reports; only the interval changes.
     """
-    by = _group(values, clusters)
+    by, n_excluded = _group(values, clusters)
     keys = list(by)
     flat = [v for k in keys for v in by[k]]
     point = sum(flat) / len(flat)
@@ -248,7 +283,8 @@ def cluster_bootstrap_mean(values, clusters, n_boot: int = 2000,
         if pool:
             draws.append(sum(pool) / len(pool))
     lo, hi = _percentiles(draws, alpha)
-    return Estimate(point, lo, hi, len(keys), len(flat), n_boot, alpha)
+    return Estimate(point, lo, hi, len(keys), len(flat), n_boot, alpha,
+                    n_excluded)
 
 
 def cluster_bootstrap_paired_diff(values_a, values_b, clusters,
@@ -264,15 +300,17 @@ def cluster_bootstrap_paired_diff(values_a, values_b, clusters,
         raise ValueError("values_a, values_b and clusters must be the same length")
 
     by: dict[str, list[tuple[float, float]]] = {}
+    n_excluded = 0
     for va, vb, g in zip(values_a, values_b, clusters):
-        if va is None or vb is None:
-            continue
-        if (isinstance(va, float) and math.isnan(va)) or \
-           (isinstance(vb, float) and math.isnan(vb)):
+        bad = (va is None or vb is None
+               or (isinstance(va, float) and (math.isnan(va) or math.isinf(va)))
+               or (isinstance(vb, float) and (math.isnan(vb) or math.isinf(vb))))
+        if bad:
+            n_excluded += 1
             continue
         by.setdefault(g, []).append((float(va), float(vb)))
     if not by:
-        raise ValueError("no finite pairs")
+        raise ValueError(f"no finite pairs ({n_excluded} excluded)")
 
     keys = list(by)
     flat = [p for k in keys for p in by[k]]
@@ -286,7 +324,8 @@ def cluster_bootstrap_paired_diff(values_a, values_b, clusters,
         if pool:
             draws.append(sum(b - a for a, b in pool) / len(pool))
     lo, hi = _percentiles(draws, alpha)
-    return Estimate(point, lo, hi, len(keys), len(flat), n_boot, alpha)
+    return Estimate(point, lo, hi, len(keys), len(flat), n_boot, alpha,
+                    n_excluded)
 
 
 def cluster_proportion(events, clusters, n_boot: int = 2000,

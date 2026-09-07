@@ -47,7 +47,17 @@ def to_yolo_line(box: list[float], cls: int = 0) -> str:
 
 
 def export_split(samples: list[dict], image_dir: str, out_root: str,
-                 split: str) -> dict:
+                 split: str, keep_empty: bool = False) -> dict:
+    """Write one split.
+
+    ``keep_empty`` writes a frame that has no box as an image plus an empty
+    label file, which is how YOLO represents a true negative.  Dropping such
+    frames from a validation split means mAP never penalises a detection on
+    open water, so the reported precision is an optimistic bound and nothing in
+    the export tells a reader the val set is smaller than the frame set it
+    names.  Training splits do not need them, so the default is to drop and
+    count.
+    """
     img_dir = os.path.join(out_root, "images", split)
     lbl_dir = os.path.join(out_root, "labels", split)
     os.makedirs(img_dir, exist_ok=True)
@@ -56,10 +66,15 @@ def export_split(samples: list[dict], image_dir: str, out_root: str,
     n_written = 0
     n_boxes = 0
     missing = 0
+    n_empty_kept = 0
+    n_empty_dropped = 0
     for s in samples:
         boxes = s.get("bboxes") or []
         if not boxes:
-            continue
+            if not keep_empty:
+                n_empty_dropped += 1
+                continue
+            n_empty_kept += 1
         src = s["image"]
         if not os.path.isabs(src):
             src = os.path.join(image_dir, src)
@@ -79,7 +94,10 @@ def export_split(samples: list[dict], image_dir: str, out_root: str,
         n_boxes += len(boxes)
 
     return {"split": split, "n_images": n_written, "n_boxes": n_boxes,
-            "n_missing_images": missing}
+            "n_missing_images": missing,
+            "n_empty_frames_kept": n_empty_kept,
+            "n_empty_frames_dropped": n_empty_dropped,
+            "keep_empty": keep_empty}
 
 
 def parse_args():
@@ -102,14 +120,19 @@ def main():
                             ("val", args.val_json, args.val_images)):
         with open(js) as f:
             samples = json.load(f)
-        info = export_split(samples, imgs, args.out_root, split)
+        info = export_split(samples, imgs, args.out_root, split,
+                            keep_empty=(split == "val"))
         info["source_json"] = js
         info["source_images"] = imgs
         stats.append(info)
         print(f"[yolo] {split:5s} {info['n_images']:,} images, "
               f"{info['n_boxes']:,} boxes"
               + (f", {info['n_missing_images']} missing"
-                 if info["n_missing_images"] else ""))
+                 if info["n_missing_images"] else "")
+              + (f", 빈 프레임 유지 {info['n_empty_frames_kept']:,}"
+                 if info["n_empty_frames_kept"] else "")
+              + (f", 빈 프레임 제외 {info['n_empty_frames_dropped']:,}"
+                 if info["n_empty_frames_dropped"] else ""))
 
     yaml_path = os.path.join(args.out_root, "data.yaml")
     with open(yaml_path, "w") as f:

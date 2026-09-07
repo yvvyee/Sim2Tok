@@ -250,15 +250,16 @@ def section_halluc(root: str) -> list[str]:
             L += [f"### {title}", "", "결과 대기 중입니다.", ""]
             continue
         L += [f"### {title}", ""]
-        L += ["| 조건 | 프로브 | 환각 | 비율 | 정확 이항 95% | 비디오 부트스트랩 95% |",
-              "|---|---|---|---|---|---|"]
+        L += ["| 조건 | 프로브 | 환각 | 비율 | 정확 이항 95% | 비디오 부트스트랩 95% | 미분류 |",
+              "|---|---|---|---|---|---|---|"]
         for key, r in s.get("results", {}).items():
             o = r.get("overall") or {}
             ex, cb = o.get("exact_binomial", {}), o.get("cluster_bootstrap", {})
             L.append(f"| {key} | {o.get('n', 0):,} | {o.get('k', 0)} | "
                      f"{o.get('rate', 0) * 100:.4f}% | "
                      f"[{ex.get('lo', 0) * 100:.4f}%, {ex.get('hi', 0) * 100:.4f}%] | "
-                     f"[{cb.get('lo', 0) * 100:.4f}%, {cb.get('hi', 0) * 100:.4f}%] |")
+                     f"[{cb.get('lo', 0) * 100:.4f}%, {cb.get('hi', 0) * 100:.4f}%] | "
+                     f"{r.get('n_unparsed', '—')} |")
         L.append("")
 
         # Fisher between the stock and gaa conditions within each mode.
@@ -272,7 +273,30 @@ def section_halluc(root: str) -> list[str]:
             kb, nb = b["overall"]["k"], b["overall"]["n"]
             p = fisher_exact_2x2(ka, na - ka, kb, nb - kb)
             L.append(f"- `{mode}` 프로토콜: stock {ka}/{na} 대 GAA {kb}/{nb}, "
-                     f"Fisher 정확검정 p = {p:.4g}")
+                     f"Fisher 정확검정 p = {p:.4g} "
+                     f"(**프레임 독립 가정**. 프로브는 프레임당 여러 개, "
+                     f"비디오당 여러 프레임이므로 실제 독립 단위는 비디오 "
+                     f"59편에 가깝다. 이 p값은 낙관적 하한으로만 읽어야 "
+                     f"하며, 아래 비디오 단위 차이가 인용할 값이다.)")
+        # The quotable comparison: paired, resampled over videos.
+        for mode in ("with", "without"):
+            a = probes.get(f"stock__{mode}")
+            b = probes.get(f"gaa__{mode}")
+            if not (a and b):
+                continue
+            ia = {(r["id"], r["object"]): r for r in a}
+            ib = {(r["id"], r["object"]): r for r in b}
+            common = sorted(set(ia) & set(ib))
+            if not common:
+                continue
+            est = cluster_bootstrap_paired_diff(
+                [ia[k]["halluc"] for k in common],
+                [ib[k]["halluc"] for k in common],
+                [ia[k]["video"] for k in common])
+            L.append(f"- `{mode}` 프로토콜 비디오 단위 짝지은 환각률 차이 "
+                     f"(GAA − stock): {est.point * 100:+.4f}%p "
+                     f"[{est.lo * 100:+.4f}, {est.hi * 100:+.4f}] "
+                     f"(짝지은 프로브 {est.n_items:,}, 비디오 {est.n_clusters})")
         L.append("")
 
         # The image-token check: identical answers means no visual input.

@@ -45,6 +45,7 @@ import argparse
 import json
 import os
 import sys
+from collections import Counter
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -74,10 +75,52 @@ ABSENT_EXTRA = [
 QUESTION = "Is there a {obj} in this image? Answer yes or no."
 
 
+#: Words that make an answer affirmative even when it does not start with them.
+_AFFIRM = ("yes", "affirmative", "there is", "there are", "i can see",
+           "correct")
+_DENY = ("no", "negative", "there is no", "there are no", "not present",
+         "cannot see", "i do not see", "incorrect")
+
+
 def yes(answer: str) -> bool:
-    """The submitted work's match rule, unchanged."""
+    """The submitted work's match rule, unchanged.
+
+    Kept exactly as it was so the rate stays comparable with the submitted
+    number.  ``verdict`` is what new tables should use.
+    """
     a = answer.strip().lower()
     return a.startswith("yes") or " yes" in a[:12]
+
+
+def verdict(answer: str) -> str:
+    """``"yes"``, ``"no"`` or ``"unparsed"``.
+
+    The submitted rule is a single boolean, so anything it does not recognise
+    counts as "no hallucination".  That folds three different things together:
+    a genuine denial, an affirmation phrased differently ("Based on the image,
+    yes, ...", whose first twelve characters are "based on the"), and an empty
+    or degenerate generation.  The last two inflate the apparent improvement,
+    and in the direction the claim predicts: swapping the vision tower without
+    re-tuning the projector could plausibly make output more degenerate, which
+    would read as fewer hallucinations.
+
+    So the three are separated and counted.  ``unparsed`` probes are reported
+    on their own rather than absorbed into either rate.
+    """
+    a = answer.strip().lower()
+    if not a:
+        return "unparsed"
+    if a.startswith("yes") or " yes" in a[:12]:
+        return "yes"
+    if a.startswith("no") or " no " in a[:12]:
+        return "no"
+    for d in _DENY:
+        if d in a[:40]:
+            return "no"
+    for w in _AFFIRM:
+        if w in a[:40]:
+            return "yes"
+    return "unparsed"
 
 
 class FrameOnly(Dataset):
@@ -140,8 +183,9 @@ def probe_one(model, tokenizer, loader, obj: str, with_image_token: bool,
                 "split": meta.get("split", ""),
                 "condition": meta.get("condition", ""),
                 "object": obj,
-                "answer": text.strip()[:64],
+                "answer": text.strip()[:160],
                 "halluc": int(yes(text)),
+                "verdict": verdict(text),
             })
     return records
 
@@ -252,6 +296,13 @@ def main():
                 from additional.stats import cluster_proportion, clopper_pearson
                 overall = cluster_proportion([r["halluc"] for r in merged],
                                              [r["video"] for r in merged])
+                by_verdict = Counter(r["verdict"] for r in merged)
+                parsed = [r for r in merged if r["verdict"] != "unparsed"]
+                overall_parsed = (
+                    cluster_proportion([int(r["verdict"] == "yes")
+                                        for r in parsed],
+                                       [r["video"] for r in parsed])
+                    if parsed else None)
                 paper3 = [r for r in merged if r["object"] in ABSENT_PAPER]
                 summary[key] = {
                     "encoder": report,
@@ -259,6 +310,9 @@ def main():
                     "n_probes": len(merged),
                     "n_objects": len(objects),
                     "overall": overall,
+                    "verdict_counts": dict(by_verdict),
+                    "n_unparsed": by_verdict.get("unparsed", 0),
+                    "overall_excluding_unparsed": overall_parsed,
                     "paper_three_objects": (
                         cluster_proportion([r["halluc"] for r in paper3],
                                            [r["video"] for r in paper3])
@@ -276,8 +330,8 @@ def main():
                 print(f"[probe] {key:24s} {overall['k']}/{overall['n']} = "
                       f"{overall['rate'] * 100:.4f}%  "
                       f"exact 95% [{ex['lo'] * 100:.4f}, {ex['hi'] * 100:.4f}]  "
-                      f"video-boot [{cb['lo'] * 100:.4f}, {cb['hi'] * 100:.4f}]",
-                      flush=True)
+                      f"video-boot [{cb['lo'] * 100:.4f}, {cb['hi'] * 100:.4f}]  "
+                      f"미분류 {by_verdict.get('unparsed', 0)}", flush=True)
 
     if rank == 0:
         meta = {
