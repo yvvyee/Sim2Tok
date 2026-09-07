@@ -23,7 +23,29 @@ from __future__ import annotations
 
 import math
 import random
+import re
 from dataclasses import dataclass, asdict
+
+# ── Cluster identity ─────────────────────────────────────────────────────────
+
+#: ``MVI_1448_VIS_Haze_f00000`` -> ``MVI_1448_VIS_Haze``
+_FRAME_SUFFIX = re.compile(r"_f\d+$")
+
+
+def video_of(sample: dict) -> str:
+    """The video a frame came from, which is the cluster the intervals resample.
+
+    Sets built by ``smd_full_to_gaa`` carry an explicit ``video`` field.  The
+    evaluation sets used by the submitted work do not, so it is recovered from
+    the frame id by stripping the ``_f<index>`` suffix.  Falling back to the id
+    itself would make every frame its own cluster and report an interval far
+    narrower than the data supports: on the 288-frame set that is 288 clusters
+    instead of the 36 videos they came from.
+    """
+    if sample.get("video"):
+        return sample["video"]
+    stem = _FRAME_SUFFIX.sub("", sample.get("id", ""))
+    return stem or sample.get("id", "")
 
 # ── Regularised incomplete beta ──────────────────────────────────────────────
 

@@ -58,6 +58,7 @@ from PIL import Image
 from torch.utils.data import Dataset, DataLoader
 
 from gaa.geometric_loss import compute_geometric_mask
+from additional.stats import video_of
 
 DTYPES = {"float32": torch.float32, "float16": torch.float16,
           "bfloat16": torch.bfloat16}
@@ -265,7 +266,7 @@ def main():
             for meta, i_, b_, k_ in zip(metas, iou, inbox, karea):
                 records.append({
                     "id": meta["id"],
-                    "video": meta.get("video", meta["id"]),
+                    "video": video_of(meta),
                     "split": meta.get("split", ""),
                     "condition": meta.get("condition", ""),
                     "attn_iou": i_,

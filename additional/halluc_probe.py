@@ -53,6 +53,7 @@ import torch.distributed as dist
 from PIL import Image
 from torch.utils.data import Dataset, DataLoader
 
+from additional.stats import video_of
 from additional.vlm_loader import build_vlm, swap_encoder, uniform_prompt
 
 DTYPES = {"float32": torch.float32, "float16": torch.float16,
@@ -133,7 +134,7 @@ def probe_one(model, tokenizer, loader, obj: str, with_image_token: bool,
         for meta, text in zip(metas, texts):
             records.append({
                 "id": meta["id"],
-                "video": meta.get("video", meta["id"]),
+                "video": video_of(meta),
                 "split": meta.get("split", ""),
                 "condition": meta.get("condition", ""),
                 "object": obj,

@@ -55,6 +55,7 @@ from gaa.geo_validate_vlms import (
     extract_attn_map, compute_attn_iou,
 )
 from gaa.geo_train_vlm import extract_spatial_attn_train
+from additional.stats import video_of
 
 DTYPES = {"float32": torch.float32, "float16": torch.float16,
           "bfloat16": torch.bfloat16}
@@ -72,7 +73,7 @@ def load_samples(data_path: str, image_dir: str) -> list[dict]:
         if not os.path.isabs(path) and image_dir:
             path = os.path.join(image_dir, path)
         out.append({"path": path, "bboxes": s["bboxes"],
-                    "video": s.get("video", s.get("id", "")),
+                    "video": video_of(s),
                     "split": s.get("split", ""),
                     "condition": s.get("condition", ""),
                     "id": s.get("id", "")})
