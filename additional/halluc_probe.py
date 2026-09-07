@@ -53,6 +53,8 @@ import torch.distributed as dist
 from PIL import Image
 from torch.utils.data import Dataset, DataLoader
 
+from additional.vlm_loader import build_vlm, swap_encoder, uniform_prompt
+
 DTYPES = {"float32": torch.float32, "float16": torch.float16,
           "bfloat16": torch.bfloat16}
 
@@ -106,61 +108,10 @@ def collate(batch):
     return torch.stack([b[0] for b in batch]), [b[1] for b in batch]
 
 
-def build_vlm(args, dtype, device):
-    """The submitted VLM: CLIP tower, trained projector, LoRA-adapted LLM."""
-    from peft import PeftModel
-    from model import VLMConfig, build_model
-
-    cfg = VLMConfig(
-        vision_model_name=args.vision_model,
-        llm_model_name=args.llm,
-        projector_type=args.projector_type,
-        vision_feature_layer=-2,
-        vision_feature_select_strategy="patch",
-        freeze_vision=True,
-        freeze_llm=True,
-    )
-    model = build_model(cfg, torch_dtype=dtype)
-
-    proj = os.path.join(args.vlm_ckpt, "projector.bin")
-    if not os.path.exists(proj):
-        raise FileNotFoundError(f"projector.bin missing under {args.vlm_ckpt}")
-    model.projector.load_weights(
-        torch.load(proj, map_location="cpu", weights_only=True))
-
-    model.language_model = PeftModel.from_pretrained(
-        model.language_model, args.vlm_ckpt, is_trainable=False)
-    return model.to(device).eval()
-
-
-def swap_encoder(model, ckpt: str | None) -> dict:
-    """Overlay encoder weights on the frozen tower; refuse a silent no-op."""
-    if not ckpt or ckpt.lower() in ("none", ""):
-        return {"ckpt": None, "matched": 0, "total": 0}
-    if not os.path.exists(ckpt):
-        raise FileNotFoundError(f"encoder checkpoint not found: {ckpt}")
-    state = torch.load(ckpt, map_location="cpu", weights_only=True)
-    if state and all(k.startswith("model.") for k in state):
-        state = {k[len("model."):]: v for k, v in state.items()}
-    missing, unexpected = model.vision_encoder.model.load_state_dict(
-        state, strict=False)
-    matched = len(state) - len(unexpected)
-    if matched == 0:
-        raise RuntimeError(f"no vision weights matched from {ckpt}")
-    return {"ckpt": ckpt, "matched": matched, "total": len(state),
-            "missing": len(missing), "unexpected": len(unexpected)}
-
-
 def build_prompt(tokenizer, obj: str, with_image_token: bool) -> torch.Tensor:
     """Token ids for one probe question, identical for every frame."""
-    q = QUESTION.format(obj=obj)
-    if with_image_token:
-        q = "<image>\n" + q
-    text = tokenizer.apply_chat_template(
-        [{"role": "user", "content": q}],
-        tokenize=False, add_generation_prompt=True)
-    return tokenizer(text, add_special_tokens=False,
-                     return_tensors="pt").input_ids
+    return uniform_prompt(tokenizer, QUESTION.format(obj=obj),
+                          with_image_token)
 
 
 @torch.no_grad()
@@ -254,7 +205,8 @@ def main():
               f"{len(samples) * len(objects) * len(modes):,} probes, "
               f"world={world}", flush=True)
 
-    model = build_vlm(args, dtype, device)
+    model = build_vlm(args.vlm_ckpt, args.llm, args.vision_model,
+                      args.projector_type, dtype, device)
     tokenizer = model.tokenizer
 
     summary: dict[str, dict] = {}
