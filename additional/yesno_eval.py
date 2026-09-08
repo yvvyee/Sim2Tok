@@ -251,7 +251,8 @@ def read_part(path: str) -> list[dict]:
         return [json.loads(line) for line in f if line.strip()]
 
 
-def summarise(records: list[dict], paper_three: list[str]) -> dict:
+def summarise(records: list[dict], paper_three: list[str],
+              min_present_rate: float = 0.5) -> dict:
     from additional.stats import cluster_proportion, clopper_pearson
 
     def rate(sub, field):
@@ -279,8 +280,22 @@ def summarise(records: list[dict], paper_three: list[str]) -> dict:
         disc["yes_rate_absent"] = ya
         disc["yes_rate_present"] = yp
         disc["gap"] = yp["rate"] - ya["rate"]
-        # The gate: without a positive gap the absent rate is an answer bias.
-        disc["discriminates"] = bool(yp["rate"] - ya["rate"] > 0.0)
+        # A positive gap is not enough.  An encoder swap can leave the model
+        # answering "no" to almost everything, and then the absent rate is low
+        # while the model is also wrong about objects that are plainly there:
+        # one condition here answers "yes" to water and sky, present in every
+        # frame, on 4.51% of them, and its absent rate of 2.04% says nothing
+        # about hallucination.  So the gate also requires the model to be right
+        # more often than not when the answer is known to be yes.  The
+        # threshold is a stated choice, recorded here rather than left implicit.
+        disc["min_present_rate"] = min_present_rate
+        disc["discriminates"] = bool(yp["rate"] - ya["rate"] > 0.0
+                                     and yp["rate"] >= min_present_rate)
+        disc["gate_note"] = (
+            "부재 긍정률을 환각률로 읽으려면 두 조건이 필요하다. 극성 차이가 "
+            "양수여야 하고, 반드시 있는 물체에 대해 절반 이상 맞혀야 한다. "
+            "두 번째 조건이 없으면 거의 모든 것에 no 라고 답하는 조합이 낮은 "
+            "부재 긍정률로 통과한다")
 
     per_question = {}
     for k in sorted({r["question"] for r in records}):
@@ -339,6 +354,11 @@ def parse_args():
                    help="'without' drops the <image> token so the encoder's "
                         "output never reaches the language model; two "
                         "encoders must then agree on every frame")
+    p.add_argument("--min_present_rate", type=float, default=0.5,
+                   help="the absent rate is reported as a hallucination rate "
+                        "only if the affirmative rate on known-present "
+                        "categories reaches this; a swap that makes the model "
+                        "answer no to everything would otherwise pass")
     p.add_argument("--keep_text", type=int, default=4,
                    help="tokens to generate and record; the decision is read "
                         "from the first one regardless")
@@ -457,7 +477,7 @@ def main():
             with open(out_path, "w") as f:
                 for r in merged:
                     f.write(json.dumps(r, ensure_ascii=False) + "\n")
-            stats = summarise(merged, absent[:3])
+            stats = summarise(merged, absent[:3], args.min_present_rate)
             stats["encoder"] = report
             stats["image_token_mode"] = args.image_token_mode
             stats["answers_path"] = out_path
