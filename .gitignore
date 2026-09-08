@@ -247,3 +247,6 @@ gaa_attn_viz*/
 # IDE
 .idea/
 .vscode/
+
+# 결과는 저장소 밖 ../additional_exp 에 보관한다
+additional_exp/
