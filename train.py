@@ -84,6 +84,11 @@ def parse_args():
     p.add_argument("--lr_scheduler", default="cosine",
                    choices=["cosine", "linear", "constant"])
     p.add_argument("--save_steps",    type=int, default=500)
+    p.add_argument("--save_total_limit", type=int, default=None,
+                   help="Keep at most this many step checkpoints, deleting the "
+                        "oldest. Each one carries the optimiser state for the "
+                        "trainable parameters, so an unbounded run fills the "
+                        "disk. Omit to keep every checkpoint.")
     p.add_argument("--logging_steps", type=int, default=10)
     p.add_argument("--max_steps", type=int, default=-1)
 
@@ -438,6 +443,7 @@ def main():
         # Saving / logging
         save_strategy="steps",
         save_steps=args.save_steps,
+        save_total_limit=args.save_total_limit,
         max_steps=args.max_steps,
         logging_steps=args.logging_steps,
         report_to=report_to,
