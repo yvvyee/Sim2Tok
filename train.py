@@ -99,6 +99,10 @@ def parse_args():
     p.add_argument("--dtype", default="bfloat16",
                    choices=["bfloat16", "float16", "float32"])
     p.add_argument("--gradient_checkpointing", action="store_true", default=True)
+    p.add_argument("--no_tensorboard", action="store_true",
+                   help="Turn off the TensorBoard reporting integration. The "
+                        "code below already checks this flag but it was never "
+                        "declared, so the escape hatch could not be reached.")
     p.add_argument("--dataloader_workers", type=int, default=4)
 
     # DeepSpeed
@@ -184,25 +188,34 @@ class VLMTrainer(Trainer):
             super()._save_checkpoint(model, trial)
             return
 
+        # Under DistributedDataParallel the trainer holds the wrapper, whose
+        # attributes are those of DDP and not of the VLM.  Reading
+        # ``model.projector`` off the wrapper raises AttributeError, so a
+        # multi-GPU run trains normally and then fails at the first save.
+        # Only the component saves below read through the wrapper; the base
+        # class still receives the model it was given, because it saves
+        # optimiser and scheduler state against that object.
+        inner = getattr(model, "module", model)
+
         # Always save tokenizer
-        if hasattr(model, "tokenizer"):
-            model.tokenizer.save_pretrained(checkpoint_dir)
+        if hasattr(inner, "tokenizer"):
+            inner.tokenizer.save_pretrained(checkpoint_dir)
 
         if self.train_type == "projector":
-            proj_state = model.projector.state_dict()
+            proj_state = inner.projector.state_dict()
             torch.save(proj_state, os.path.join(checkpoint_dir, "projector.bin"))
             print(f"[Trainer] Saved projector → {checkpoint_dir}/projector.bin")
 
         elif self.train_type in ("lora", "full"):
-            proj_state = model.projector.state_dict()
+            proj_state = inner.projector.state_dict()
             torch.save(proj_state, os.path.join(checkpoint_dir, "projector.bin"))
 
             if self.train_type == "lora":
-                if hasattr(model.language_model, "save_pretrained"):
-                    model.language_model.save_pretrained(checkpoint_dir)
+                if hasattr(inner.language_model, "save_pretrained"):
+                    inner.language_model.save_pretrained(checkpoint_dir)
                     print(f"[Trainer] Saved LoRA adapter → {checkpoint_dir}")
             else:
-                model.language_model.save_pretrained(checkpoint_dir)
+                inner.language_model.save_pretrained(checkpoint_dir)
                 print(f"[Trainer] Saved full LLM → {checkpoint_dir}")
 
         super()._save_checkpoint(model, trial)

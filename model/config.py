@@ -61,6 +61,18 @@ class VLMConfig:
         import dataclasses
         return dataclasses.asdict(self)
 
+    def to_json_string(self) -> str:
+        """JSON form of the config.
+
+        Hugging Face's TensorBoard integration calls this on the model's
+        config at the start of training.  Without it a run with TensorBoard
+        reporting enabled fails in ``on_train_begin`` with an AttributeError
+        before the first step, which is how the yes/no fine-tune first failed.
+        """
+        import json
+        return json.dumps(self.to_dict(), indent=2, default=str,
+                          ensure_ascii=False)
+
     @property
     def vision_model_type(self) -> str:
         name = self.vision_model_name.lower()

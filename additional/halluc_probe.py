@@ -516,10 +516,18 @@ def main():
                     merged_obj.sort(key=lambda r: r["id"])
                     write_part(p_part, p_ok, merged_obj)
                     dt = time.time() - t0
-                    k = sum(r["halluc"] for r in merged_obj)
                     n = len(merged_obj)
+                    # The yes-rate, not the hallucination count.  For a
+                    # category present in the frame the hallucination count is
+                    # 0 by definition, so logging it would print 0/N for every
+                    # control object and the polarity gap the interleaved order
+                    # exists to reveal would not be visible in the log at all.
+                    sy = sum(r["said_yes"] for r in merged_obj)
+                    exp = merged_obj[0].get("expected_yes")
+                    pol = {1: "존재", 0: "부재"}.get(exp, "미정")
                     print(f"[probe] {key} [{i_obj}/{len(objects)}] "
-                          f"{obj}: {k}/{n} = {100.0 * k / max(n, 1):.4f}%  "
+                          f"{obj} ({pol}): yes {sy}/{n} = "
+                          f"{100.0 * sy / max(n, 1):.4f}%  "
                           f"{dt:.0f}s  "
                           f"{n / max(dt, 1e-9):.1f} probes/s", flush=True)
 
