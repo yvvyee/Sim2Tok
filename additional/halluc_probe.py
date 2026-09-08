@@ -45,6 +45,7 @@ import argparse
 import json
 import os
 import sys
+import time
 from collections import Counter
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -252,6 +253,38 @@ def probe_one(model, tokenizer, loader, obj: str, with_image_token: bool,
     return records
 
 
+def part_paths(out_dir: str, key: str, obj: str) -> tuple[str, str]:
+    """Where one object's probes and its completion marker live.
+
+    A pass over the full SMD frame set is 585,060 probes per encoder, which
+    runs for hours.  Writing only at the end of an encoder means an
+    interruption at hour nine leaves nothing, so each object is persisted as it
+    finishes and a separate marker file records that the write completed.  The
+    marker exists because a probe file cannot be checked by line count: frames
+    whose image fails to open are skipped, so a short file is not necessarily a
+    truncated one.
+    """
+    stem = f"probes_{key}__{obj.replace(' ', '_')}"
+    d = os.path.join(out_dir, "parts")
+    return os.path.join(d, stem + ".jsonl"), os.path.join(d, stem + ".ok")
+
+
+def write_part(path: str, marker: str, records: list[dict]) -> None:
+    """Write one object's records, then its marker, never the other order."""
+    tmp = path + ".tmp"
+    with open(tmp, "w") as f:
+        for r in records:
+            f.write(json.dumps(r, ensure_ascii=False) + "\n")
+    os.replace(tmp, path)
+    with open(marker, "w") as f:
+        json.dump({"n_records": len(records)}, f)
+
+
+def read_part(path: str) -> list[dict]:
+    with open(path) as f:
+        return [json.loads(line) for line in f if line.strip()]
+
+
 def parse_args():
     p = argparse.ArgumentParser("large-scale absence-probe hallucination test")
     p.add_argument("--data_path", required=True)
@@ -317,7 +350,7 @@ def main():
              else [args.image_token_mode])
 
     if rank == 0:
-        os.makedirs(args.out_dir, exist_ok=True)
+        os.makedirs(os.path.join(args.out_dir, "parts"), exist_ok=True)
         print(f"[probe] {len(samples):,} frames x {len(objects)} objects "
               f"x {len(modes)} mode(s) = "
               f"{len(samples) * len(objects) * len(modes):,} probes, "
@@ -350,21 +383,57 @@ def main():
                             pin_memory=True)
 
         for mode in modes:
-            records: list[dict] = []
-            for obj in objects:
-                records.extend(probe_one(model, tokenizer, loader, obj,
-                                         mode == "with", device, dtype,
-                                         args.max_new_tokens, args.scoring,
-                                         yes_ids, no_ids))
-            if distributed:
-                gathered: list[list[dict]] = [None] * world  # type: ignore[list-item]
-                dist.all_gather_object(gathered, records)
-                merged = [r for part in gathered for r in part]
-            else:
-                merged = records
-
             key = f"{label}__{mode}__{args.scoring}"
+
+            for i_obj, obj in enumerate(objects, 1):
+                p_part, p_ok = part_paths(args.out_dir, key, obj)
+
+                # Rank 0 alone decides whether this object is already on disk,
+                # and the decision is broadcast.  A rank that decided
+                # differently from its peers would enter a collective the
+                # others skipped, and the job would hang rather than fail.
+                skip = 0
+                if rank == 0:
+                    skip = 1 if (os.path.exists(p_ok)
+                                 and os.path.exists(p_part)) else 0
+                if distributed:
+                    flag = torch.tensor([skip], device=device)
+                    dist.broadcast(flag, src=0)
+                    skip = int(flag.item())
+                if skip:
+                    if rank == 0:
+                        print(f"[probe] {key} [{i_obj}/{len(objects)}] "
+                              f"{obj}: 기존 결과 재사용", flush=True)
+                    continue
+
+                t0 = time.time()
+                recs = probe_one(model, tokenizer, loader, obj,
+                                 mode == "with", device, dtype,
+                                 args.max_new_tokens, args.scoring,
+                                 yes_ids, no_ids)
+                if distributed:
+                    gathered: list[list[dict]] = [None] * world  # type: ignore[list-item]
+                    dist.all_gather_object(gathered, recs)
+                    merged_obj = [r for part in gathered for r in part]
+                else:
+                    merged_obj = recs
+
+                if rank == 0:
+                    merged_obj.sort(key=lambda r: r["id"])
+                    write_part(p_part, p_ok, merged_obj)
+                    dt = time.time() - t0
+                    k = sum(r["halluc"] for r in merged_obj)
+                    n = len(merged_obj)
+                    print(f"[probe] {key} [{i_obj}/{len(objects)}] "
+                          f"{obj}: {k}/{n} = {100.0 * k / max(n, 1):.4f}%  "
+                          f"{dt:.0f}s  "
+                          f"{n / max(dt, 1e-9):.1f} probes/s", flush=True)
+
             if rank == 0:
+                merged: list[dict] = []
+                for obj in objects:
+                    p_part, _ = part_paths(args.out_dir, key, obj)
+                    merged.extend(read_part(p_part))
                 merged.sort(key=lambda r: (r["object"], r["id"]))
                 path_out = os.path.join(args.out_dir, f"probes_{key}.jsonl")
                 with open(path_out, "w") as f:
