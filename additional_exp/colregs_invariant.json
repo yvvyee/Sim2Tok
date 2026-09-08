@@ -1,0 +1,310 @@
+{
+  "note": "accuracy on this corpus follows the prediction prior; macro_recall, cramers_v and nmi are invariant to it",
+  "bootstrap": {
+    "n_boot": 2000,
+    "seed": 0,
+    "resampling_unit": "sample",
+    "caveat": "the AIVN-SDS id is an opaque hash with no episode field, so episode-level clustering cannot be checked from the data"
+  },
+  "reference": {
+    "label_distribution": {
+      "crossing": 3575,
+      "head-on": 3528,
+      "overtaking": 2897
+    },
+    "macro_recall_of_any_constant_prediction": 0.3333333333333333,
+    "accuracy_of_each_constant_prediction": {
+      "crossing": 0.3575,
+      "head-on": 0.3528,
+      "overtaking": 0.2897
+    },
+    "cramers_v_of_any_constant_prediction": 0.0,
+    "nmi_of_any_constant_prediction": 0.0
+  },
+  "conditions": {
+    "stock__with": {
+      "n": 10000,
+      "confusion": {
+        "crossing": {
+          "crossing": 248,
+          "head-on": 2997,
+          "overtaking": 330
+        },
+        "head-on": {
+          "crossing": 79,
+          "head-on": 3160,
+          "overtaking": 289
+        },
+        "overtaking": {
+          "crossing": 88,
+          "head-on": 2542,
+          "overtaking": 267
+        }
+      },
+      "prediction_distribution": {
+        "crossing": 415,
+        "head-on": 8699,
+        "overtaking": 886
+      },
+      "max_pred_share": 0.8699,
+      "per_class_recall": {
+        "crossing": 0.06937062937062938,
+        "head-on": 0.8956916099773242,
+        "overtaking": 0.09216430790472903
+      },
+      "metrics": {
+        "accuracy": {
+          "point": 0.3675,
+          "lo": 0.3577,
+          "hi": 0.3768,
+          "n_draws": 2000
+        },
+        "macro_recall": {
+          "point": 0.3524088490842276,
+          "lo": 0.34695376278077134,
+          "hi": 0.35802651327471297,
+          "n_draws": 2000
+        },
+        "cramers_v": {
+          "point": 0.07626468547651198,
+          "lo": 0.06323213073240268,
+          "hi": 0.09109594654444045,
+          "n_draws": 2000
+        },
+        "nmi": {
+          "point": 0.007840814369410965,
+          "lo": 0.005412519655698096,
+          "hi": 0.011213000712018533,
+          "n_draws": 2000
+        }
+      }
+    },
+    "gaa__with": {
+      "n": 10000,
+      "confusion": {
+        "crossing": {
+          "crossing": 2665,
+          "head-on": 853,
+          "overtaking": 57
+        },
+        "head-on": {
+          "crossing": 2008,
+          "head-on": 1368,
+          "overtaking": 152
+        },
+        "overtaking": {
+          "crossing": 1808,
+          "head-on": 980,
+          "overtaking": 109
+        }
+      },
+      "prediction_distribution": {
+        "crossing": 6481,
+        "head-on": 3201,
+        "overtaking": 318
+      },
+      "max_pred_share": 0.6481,
+      "per_class_recall": {
+        "crossing": 0.7454545454545455,
+        "head-on": 0.3877551020408163,
+        "overtaking": 0.037625129444252677
+      },
+      "metrics": {
+        "accuracy": {
+          "point": 0.4142,
+          "lo": 0.4044,
+          "hi": 0.42360249999999994,
+          "n_draws": 2000
+        },
+        "macro_recall": {
+          "point": 0.3902782589798715,
+          "lo": 0.3828387737619503,
+          "hi": 0.39792437577899714,
+          "n_draws": 2000
+        },
+        "cramers_v": {
+          "point": 0.11442899186761973,
+          "lo": 0.10225602944617847,
+          "hi": 0.12796464810187497,
+          "n_draws": 2000
+        },
+        "nmi": {
+          "point": 0.014833546759572765,
+          "lo": 0.011762331335311,
+          "hi": 0.018622168514862692,
+          "n_draws": 2000
+        }
+      }
+    },
+    "twostage__with": {
+      "n": 10000,
+      "confusion": {
+        "crossing": {
+          "crossing": 1904,
+          "head-on": 1078,
+          "overtaking": 593
+        },
+        "head-on": {
+          "crossing": 1797,
+          "head-on": 1394,
+          "overtaking": 337
+        },
+        "overtaking": {
+          "crossing": 1539,
+          "head-on": 1019,
+          "overtaking": 339
+        }
+      },
+      "prediction_distribution": {
+        "crossing": 5240,
+        "head-on": 3491,
+        "overtaking": 1269
+      },
+      "max_pred_share": 0.524,
+      "per_class_recall": {
+        "crossing": 0.5325874125874126,
+        "head-on": 0.39512471655328796,
+        "overtaking": 0.11701760441836383
+      },
+      "metrics": {
+        "accuracy": {
+          "point": 0.3637,
+          "lo": 0.3536,
+          "hi": 0.37270249999999994,
+          "n_draws": 2000
+        },
+        "macro_recall": {
+          "point": 0.34824324451968813,
+          "lo": 0.3393751036319612,
+          "hi": 0.3563664567513217,
+          "n_draws": 2000
+        },
+        "cramers_v": {
+          "point": 0.07722147563927786,
+          "lo": 0.06362463752938739,
+          "hi": 0.09323425230024096,
+          "n_draws": 2000
+        },
+        "nmi": {
+          "point": 0.005749924682777609,
+          "lo": 0.00390744064667345,
+          "hi": 0.008381530317101324,
+          "n_draws": 2000
+        }
+      }
+    },
+    "stock__without": {
+      "n": 10000,
+      "confusion": {
+        "crossing": {
+          "crossing": 3575
+        },
+        "head-on": {
+          "crossing": 3528
+        },
+        "overtaking": {
+          "crossing": 2897
+        }
+      },
+      "prediction_distribution": {
+        "crossing": 10000
+      },
+      "max_pred_share": 1.0,
+      "per_class_recall": {
+        "crossing": 1.0,
+        "head-on": 0.0,
+        "overtaking": 0.0
+      },
+      "metrics": {
+        "accuracy": {
+          "point": 0.3575,
+          "lo": 0.3480975,
+          "hi": 0.3675,
+          "n_draws": 2000
+        },
+        "macro_recall": {
+          "point": 0.3333333333333333,
+          "lo": 0.3333333333333333,
+          "hi": 0.3333333333333333,
+          "n_draws": 2000
+        },
+        "cramers_v": {
+          "point": 0.0,
+          "lo": 0.0,
+          "hi": 0.0,
+          "n_draws": 2000
+        },
+        "nmi": {
+          "point": 0.0,
+          "lo": 0.0,
+          "hi": 0.0,
+          "n_draws": 2000
+        }
+      }
+    }
+  },
+  "paired": {
+    "gaa__with_minus_stock__with": {
+      "n_shared": 10000,
+      "n_only_a": 0,
+      "n_only_b": 0,
+      "diff": {
+        "accuracy": {
+          "point": 0.04670000000000002,
+          "lo": 0.033899999999999986,
+          "hi": 0.06040000000000001,
+          "n_draws": 2000
+        },
+        "macro_recall": {
+          "point": 0.03786940989564391,
+          "lo": 0.029705109325428233,
+          "hi": 0.04621993797282725,
+          "n_draws": 2000
+        },
+        "cramers_v": {
+          "point": 0.03816430639110775,
+          "lo": 0.01932080876285632,
+          "hi": 0.05619808859379544,
+          "n_draws": 2000
+        },
+        "nmi": {
+          "point": 0.0069927323901618,
+          "lo": 0.0025374318287741757,
+          "hi": 0.011214199961874022,
+          "n_draws": 2000
+        }
+      }
+    },
+    "twostage__with_minus_stock__with": {
+      "n_shared": 10000,
+      "n_only_a": 0,
+      "n_only_b": 0,
+      "diff": {
+        "accuracy": {
+          "point": -0.00379999999999997,
+          "lo": -0.01680249999999998,
+          "hi": 0.009102499999999984,
+          "n_draws": 2000
+        },
+        "macro_recall": {
+          "point": -0.00416560456453946,
+          "lo": -0.013959873592911697,
+          "hi": 0.005553064634387481,
+          "n_draws": 2000
+        },
+        "cramers_v": {
+          "point": 0.0009567901627658831,
+          "lo": -0.01762179334134442,
+          "hi": 0.02092561259294721,
+          "n_draws": 2000
+        },
+        "nmi": {
+          "point": -0.0020908896866333564,
+          "lo": -0.0055688588255817335,
+          "hi": 0.0013115322684977685,
+          "n_draws": 2000
+        }
+      }
+    }
+  }
+}

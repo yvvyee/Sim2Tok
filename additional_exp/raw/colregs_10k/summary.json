@@ -1,0 +1,587 @@
+{
+  "data_path": "/mnt/ssd1/yvvyee/gaa_additional/data/aivn_10k_describe.json",
+  "vlm_ckpt": "/mnt/ssd1/yvvyee/gaa_additional/paper_ckpt/ctrl_baseline_fix",
+  "llm": "/home/yvvyee/data/Models/Llama-3.1-8B-Instruct",
+  "prompt": "Look at the vessels. Classify the COLREG encounter situation as exactly one word: head-on, crossing, overtaking, or safe. Answer with only that one word.",
+  "scoring": "gaa/vlm_behavior_eval.py parse_sit, unchanged",
+  "label_source": "AIVN-SDS file-name scenario field",
+  "classes": [
+    "head-on",
+    "crossing",
+    "overtaking",
+    "safe",
+    "unknown"
+  ],
+  "max_new_tokens": 24,
+  "dtype": "bfloat16",
+  "world_size": 4,
+  "n_samples": 10000,
+  "results": {
+    "stock__with": {
+      "n": 10000,
+      "accuracy": {
+        "k": 3675,
+        "n": 10000,
+        "point": 0.3675,
+        "lo": 0.35804026355671303,
+        "hi": 0.37703696155655475,
+        "alpha": 0.05
+      },
+      "per_scenario": {
+        "crossing": {
+          "k": 248,
+          "n": 3575,
+          "point": 0.06937062937062938,
+          "lo": 0.06125667583678307,
+          "hi": 0.0781969554831049,
+          "alpha": 0.05,
+          "pred_distribution": {
+            "overtaking": 330,
+            "head-on": 2997,
+            "crossing": 248
+          }
+        },
+        "headon": {
+          "k": 3160,
+          "n": 3528,
+          "point": 0.8956916099773242,
+          "lo": 0.8851337812093336,
+          "hi": 0.9055884622357444,
+          "alpha": 0.05,
+          "pred_distribution": {
+            "overtaking": 289,
+            "head-on": 3160,
+            "crossing": 79
+          }
+        },
+        "overtaking": {
+          "k": 267,
+          "n": 2897,
+          "point": 0.09216430790472903,
+          "lo": 0.08187446404223242,
+          "hi": 0.10328620430775629,
+          "alpha": 0.05,
+          "pred_distribution": {
+            "head-on": 2542,
+            "overtaking": 267,
+            "crossing": 88
+          }
+        }
+      },
+      "per_collision": {
+        "False": {
+          "k": 1746,
+          "n": 4688,
+          "point": 0.3724402730375427,
+          "lo": 0.35857748099805165,
+          "hi": 0.3864621277782625,
+          "alpha": 0.05
+        },
+        "True": {
+          "k": 1929,
+          "n": 5312,
+          "point": 0.36314006024096385,
+          "lo": 0.35019170074219197,
+          "hi": 0.37623895347552716,
+          "alpha": 0.05
+        }
+      },
+      "confusion": {
+        "crossing": {
+          "overtaking": 330,
+          "head-on": 2997,
+          "crossing": 248
+        },
+        "head-on": {
+          "overtaking": 289,
+          "head-on": 3160,
+          "crossing": 79
+        },
+        "overtaking": {
+          "head-on": 2542,
+          "overtaking": 267,
+          "crossing": 88
+        }
+      },
+      "prediction_distribution": {
+        "overtaking": 886,
+        "head-on": 8699,
+        "crossing": 415
+      },
+      "n_safe_or_unknown": 0,
+      "encoder": {
+        "ckpt": null,
+        "matched": 0,
+        "total": 0
+      },
+      "image_token_mode": "with",
+      "preds_path": "/mnt/ssd1/yvvyee/gaa_additional/results/colregs_10k/preds_stock__with.jsonl"
+    },
+    "stock__without": {
+      "n": 10000,
+      "accuracy": {
+        "k": 3575,
+        "n": 10000,
+        "point": 0.3575,
+        "lo": 0.34809922881579913,
+        "hi": 0.3669838280440485,
+        "alpha": 0.05
+      },
+      "per_scenario": {
+        "crossing": {
+          "k": 3575,
+          "n": 3575,
+          "point": 1.0,
+          "lo": 0.998968677785925,
+          "hi": 1.0,
+          "alpha": 0.05,
+          "pred_distribution": {
+            "crossing": 3575
+          }
+        },
+        "headon": {
+          "k": 0,
+          "n": 3528,
+          "point": 0.0,
+          "lo": 0.0,
+          "hi": 0.001045054302307797,
+          "alpha": 0.05,
+          "pred_distribution": {
+            "crossing": 3528
+          }
+        },
+        "overtaking": {
+          "k": 0,
+          "n": 2897,
+          "point": 0.0,
+          "lo": 0.0,
+          "hi": 0.0012725342917490534,
+          "alpha": 0.05,
+          "pred_distribution": {
+            "crossing": 2897
+          }
+        }
+      },
+      "per_collision": {
+        "False": {
+          "k": 1824,
+          "n": 4688,
+          "point": 0.3890784982935154,
+          "lo": 0.3750884139844243,
+          "hi": 0.4032068863605134,
+          "alpha": 0.05
+        },
+        "True": {
+          "k": 1751,
+          "n": 5312,
+          "point": 0.32963102409638556,
+          "lo": 0.3169920909310886,
+          "hi": 0.3424573888903689,
+          "alpha": 0.05
+        }
+      },
+      "confusion": {
+        "crossing": {
+          "crossing": 3575
+        },
+        "head-on": {
+          "crossing": 3528
+        },
+        "overtaking": {
+          "crossing": 2897
+        }
+      },
+      "prediction_distribution": {
+        "crossing": 10000
+      },
+      "n_safe_or_unknown": 0,
+      "encoder": {
+        "ckpt": null,
+        "matched": 0,
+        "total": 0
+      },
+      "image_token_mode": "without",
+      "preds_path": "/mnt/ssd1/yvvyee/gaa_additional/results/colregs_10k/preds_stock__without.jsonl"
+    },
+    "gaa__with": {
+      "n": 10000,
+      "accuracy": {
+        "k": 4142,
+        "n": 10000,
+        "point": 0.4142,
+        "lo": 0.40452170736450566,
+        "hi": 0.42392829217796235,
+        "alpha": 0.05
+      },
+      "per_scenario": {
+        "crossing": {
+          "k": 2665,
+          "n": 3575,
+          "point": 0.7454545454545455,
+          "lo": 0.7308384202081921,
+          "hi": 0.7596682561279628,
+          "alpha": 0.05,
+          "pred_distribution": {
+            "overtaking": 57,
+            "head-on": 853,
+            "crossing": 2665
+          }
+        },
+        "headon": {
+          "k": 1368,
+          "n": 3528,
+          "point": 0.3877551020408163,
+          "lo": 0.37163422491321674,
+          "hi": 0.4040622146988343,
+          "alpha": 0.05,
+          "pred_distribution": {
+            "crossing": 2008,
+            "head-on": 1368,
+            "overtaking": 152
+          }
+        },
+        "overtaking": {
+          "k": 109,
+          "n": 2897,
+          "point": 0.037625129444252677,
+          "lo": 0.03099397342597439,
+          "hi": 0.04520978214916099,
+          "alpha": 0.05,
+          "pred_distribution": {
+            "crossing": 1808,
+            "head-on": 980,
+            "overtaking": 109
+          }
+        }
+      },
+      "per_collision": {
+        "False": {
+          "k": 2009,
+          "n": 4688,
+          "point": 0.4285409556313993,
+          "lo": 0.4143166631214481,
+          "hi": 0.4428543345487721,
+          "alpha": 0.05
+        },
+        "True": {
+          "k": 2133,
+          "n": 5312,
+          "point": 0.4015436746987952,
+          "lo": 0.3883240561648589,
+          "hi": 0.41487156690937754,
+          "alpha": 0.05
+        }
+      },
+      "confusion": {
+        "crossing": {
+          "overtaking": 57,
+          "head-on": 853,
+          "crossing": 2665
+        },
+        "head-on": {
+          "crossing": 2008,
+          "head-on": 1368,
+          "overtaking": 152
+        },
+        "overtaking": {
+          "crossing": 1808,
+          "head-on": 980,
+          "overtaking": 109
+        }
+      },
+      "prediction_distribution": {
+        "overtaking": 318,
+        "head-on": 3201,
+        "crossing": 6481
+      },
+      "n_safe_or_unknown": 0,
+      "encoder": {
+        "ckpt": "/mnt/ssd1/yvvyee/gaa_additional/paper_ckpt/geo_encoders_fix/inbox_ce_vision_encoder.bin",
+        "matched": 391,
+        "total": 391,
+        "missing": 0,
+        "unexpected": 0
+      },
+      "image_token_mode": "with",
+      "preds_path": "/mnt/ssd1/yvvyee/gaa_additional/results/colregs_10k/preds_gaa__with.jsonl"
+    },
+    "gaa__without": {
+      "n": 10000,
+      "accuracy": {
+        "k": 3575,
+        "n": 10000,
+        "point": 0.3575,
+        "lo": 0.34809922881579913,
+        "hi": 0.3669838280440485,
+        "alpha": 0.05
+      },
+      "per_scenario": {
+        "crossing": {
+          "k": 3575,
+          "n": 3575,
+          "point": 1.0,
+          "lo": 0.998968677785925,
+          "hi": 1.0,
+          "alpha": 0.05,
+          "pred_distribution": {
+            "crossing": 3575
+          }
+        },
+        "headon": {
+          "k": 0,
+          "n": 3528,
+          "point": 0.0,
+          "lo": 0.0,
+          "hi": 0.001045054302307797,
+          "alpha": 0.05,
+          "pred_distribution": {
+            "crossing": 3528
+          }
+        },
+        "overtaking": {
+          "k": 0,
+          "n": 2897,
+          "point": 0.0,
+          "lo": 0.0,
+          "hi": 0.0012725342917490534,
+          "alpha": 0.05,
+          "pred_distribution": {
+            "crossing": 2897
+          }
+        }
+      },
+      "per_collision": {
+        "False": {
+          "k": 1824,
+          "n": 4688,
+          "point": 0.3890784982935154,
+          "lo": 0.3750884139844243,
+          "hi": 0.4032068863605134,
+          "alpha": 0.05
+        },
+        "True": {
+          "k": 1751,
+          "n": 5312,
+          "point": 0.32963102409638556,
+          "lo": 0.3169920909310886,
+          "hi": 0.3424573888903689,
+          "alpha": 0.05
+        }
+      },
+      "confusion": {
+        "crossing": {
+          "crossing": 3575
+        },
+        "head-on": {
+          "crossing": 3528
+        },
+        "overtaking": {
+          "crossing": 2897
+        }
+      },
+      "prediction_distribution": {
+        "crossing": 10000
+      },
+      "n_safe_or_unknown": 0,
+      "encoder": {
+        "ckpt": "/mnt/ssd1/yvvyee/gaa_additional/paper_ckpt/geo_encoders_fix/inbox_ce_vision_encoder.bin",
+        "matched": 391,
+        "total": 391,
+        "missing": 0,
+        "unexpected": 0
+      },
+      "image_token_mode": "without",
+      "preds_path": "/mnt/ssd1/yvvyee/gaa_additional/results/colregs_10k/preds_gaa__without.jsonl"
+    },
+    "twostage__with": {
+      "n": 10000,
+      "accuracy": {
+        "k": 3637,
+        "n": 10000,
+        "point": 0.3637,
+        "lo": 0.35426215121939975,
+        "hi": 0.37321728986577696,
+        "alpha": 0.05
+      },
+      "per_scenario": {
+        "crossing": {
+          "k": 1904,
+          "n": 3575,
+          "point": 0.5325874125874126,
+          "lo": 0.5160713243887034,
+          "hi": 0.5490501609050964,
+          "alpha": 0.05,
+          "pred_distribution": {
+            "crossing": 1904,
+            "head-on": 1078,
+            "overtaking": 593
+          }
+        },
+        "headon": {
+          "k": 1394,
+          "n": 3528,
+          "point": 0.39512471655328796,
+          "lo": 0.37894366992076145,
+          "hi": 0.4114797644526518,
+          "alpha": 0.05,
+          "pred_distribution": {
+            "crossing": 1797,
+            "overtaking": 337,
+            "head-on": 1394
+          }
+        },
+        "overtaking": {
+          "k": 339,
+          "n": 2897,
+          "point": 0.11701760441836383,
+          "lo": 0.10553110265847948,
+          "hi": 0.12928381989098853,
+          "alpha": 0.05,
+          "pred_distribution": {
+            "crossing": 1539,
+            "head-on": 1019,
+            "overtaking": 339
+          }
+        }
+      },
+      "per_collision": {
+        "False": {
+          "k": 1606,
+          "n": 4688,
+          "point": 0.34257679180887374,
+          "lo": 0.3289867924878611,
+          "hi": 0.35636312946228177,
+          "alpha": 0.05
+        },
+        "True": {
+          "k": 2031,
+          "n": 5312,
+          "point": 0.3823418674698795,
+          "lo": 0.3692470770827764,
+          "hi": 0.395566058544326,
+          "alpha": 0.05
+        }
+      },
+      "confusion": {
+        "crossing": {
+          "crossing": 1904,
+          "head-on": 1078,
+          "overtaking": 593
+        },
+        "head-on": {
+          "crossing": 1797,
+          "overtaking": 337,
+          "head-on": 1394
+        },
+        "overtaking": {
+          "crossing": 1539,
+          "head-on": 1019,
+          "overtaking": 339
+        }
+      },
+      "prediction_distribution": {
+        "crossing": 5240,
+        "head-on": 3491,
+        "overtaking": 1269
+      },
+      "n_safe_or_unknown": 0,
+      "encoder": {
+        "ckpt": "/mnt/ssd1/yvvyee/gaa_additional/paper_ckpt/realign_geo_train80/vision_encoder.bin",
+        "matched": 391,
+        "total": 391,
+        "missing": 0,
+        "unexpected": 0
+      },
+      "image_token_mode": "with",
+      "preds_path": "/mnt/ssd1/yvvyee/gaa_additional/results/colregs_10k/preds_twostage__with.jsonl"
+    },
+    "twostage__without": {
+      "n": 10000,
+      "accuracy": {
+        "k": 3575,
+        "n": 10000,
+        "point": 0.3575,
+        "lo": 0.34809922881579913,
+        "hi": 0.3669838280440485,
+        "alpha": 0.05
+      },
+      "per_scenario": {
+        "crossing": {
+          "k": 3575,
+          "n": 3575,
+          "point": 1.0,
+          "lo": 0.998968677785925,
+          "hi": 1.0,
+          "alpha": 0.05,
+          "pred_distribution": {
+            "crossing": 3575
+          }
+        },
+        "headon": {
+          "k": 0,
+          "n": 3528,
+          "point": 0.0,
+          "lo": 0.0,
+          "hi": 0.001045054302307797,
+          "alpha": 0.05,
+          "pred_distribution": {
+            "crossing": 3528
+          }
+        },
+        "overtaking": {
+          "k": 0,
+          "n": 2897,
+          "point": 0.0,
+          "lo": 0.0,
+          "hi": 0.0012725342917490534,
+          "alpha": 0.05,
+          "pred_distribution": {
+            "crossing": 2897
+          }
+        }
+      },
+      "per_collision": {
+        "False": {
+          "k": 1824,
+          "n": 4688,
+          "point": 0.3890784982935154,
+          "lo": 0.3750884139844243,
+          "hi": 0.4032068863605134,
+          "alpha": 0.05
+        },
+        "True": {
+          "k": 1751,
+          "n": 5312,
+          "point": 0.32963102409638556,
+          "lo": 0.3169920909310886,
+          "hi": 0.3424573888903689,
+          "alpha": 0.05
+        }
+      },
+      "confusion": {
+        "crossing": {
+          "crossing": 3575
+        },
+        "head-on": {
+          "crossing": 3528
+        },
+        "overtaking": {
+          "crossing": 2897
+        }
+      },
+      "prediction_distribution": {
+        "crossing": 10000
+      },
+      "n_safe_or_unknown": 0,
+      "encoder": {
+        "ckpt": "/mnt/ssd1/yvvyee/gaa_additional/paper_ckpt/realign_geo_train80/vision_encoder.bin",
+        "matched": 391,
+        "total": 391,
+        "missing": 0,
+        "unexpected": 0
+      },
+      "image_token_mode": "without",
+      "preds_path": "/mnt/ssd1/yvvyee/gaa_additional/results/colregs_10k/preds_twostage__without.jsonl"
+    }
+  }
+}
