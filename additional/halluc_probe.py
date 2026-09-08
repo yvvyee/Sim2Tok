@@ -73,6 +73,23 @@ ABSENT_EXTRA = [
     "refrigerator", "television", "laptop", "book", "clock",
 ]
 
+#: Things present in every frame of maritime footage.  These exist to measure
+#: whether the read-out discriminates at all.  A model that answers "yes" to
+#: everything scores a high rate on the absent categories without seeing
+#: anything, and reporting that rate as a hallucination rate would be wrong:
+#: the number would be a yes-bias, and an encoder that lowered it could be
+#: lowering the bias rather than the hallucination.  The gap between the
+#: expected-yes and expected-no rates is what makes the absent-object rate
+#: interpretable, so it is measured before the expensive pass and reported
+#: alongside it.
+PRESENT_ALWAYS = ["water", "sea", "sky", "horizon"]
+
+#: Asked of every frame, but the expected answer follows that frame's boxes:
+#: the SMD frame set includes open-water frames with no annotated vessel.  This
+#: is the only category whose expected answer varies frame by frame, so it
+#: tests presence detection rather than a constant.
+VESSEL_OBJECT = "ship"
+
 QUESTION = "Is there a {obj} in this image? Answer yes or no."
 
 #: Surface forms of an affirmative and a negative first token.  Both cases and
@@ -177,6 +194,21 @@ def build_prompt(tokenizer, obj: str, with_image_token: bool) -> torch.Tensor:
                           with_image_token)
 
 
+def expected_yes_for(obj: str, meta: dict) -> int | None:
+    """Whether "yes" is the correct answer for this object on this frame.
+
+    ``None`` for a category whose presence is not established by the data, so
+    the record carries no correctness claim rather than a guessed one.
+    """
+    if obj in ABSENT_PAPER or obj in ABSENT_EXTRA:
+        return 0
+    if obj in PRESENT_ALWAYS:
+        return 1
+    if obj == VESSEL_OBJECT:
+        return 1 if (meta.get("bboxes") or []) else 0
+    return None
+
+
 @torch.no_grad()
 def probe_one(model, tokenizer, loader, obj: str, with_image_token: bool,
               device, dtype, max_new: int, scoring: str,
@@ -220,6 +252,8 @@ def probe_one(model, tokenizer, loader, obj: str, with_image_token: bool,
             p_yes = torch.sigmoid(y - n).tolist()
             top = first.argmax(dim=-1).tolist()
             for meta, m_, p_, t_ in zip(metas, margin, p_yes, top):
+                said_yes = int(m_ > 0.0)
+                exp = expected_yes_for(obj, meta)
                 records.append({
                     "id": meta["id"],
                     "video": video_of(meta),
@@ -229,8 +263,13 @@ def probe_one(model, tokenizer, loader, obj: str, with_image_token: bool,
                     "answer": tokenizer.decode([t_]).strip()[:32],
                     "yes_minus_no_logprob": round(m_, 5),
                     "p_yes_given_binary": round(p_, 6),
-                    "halluc": int(m_ > 0.0),
-                    "verdict": "yes" if m_ > 0.0 else "no",
+                    "said_yes": said_yes,
+                    "expected_yes": exp,
+                    "correct": None if exp is None else int(said_yes == exp),
+                    # "halluc" stays "said yes to an absent object", so the
+                    # submitted rate is recomputable from these records.
+                    "halluc": said_yes if exp == 0 else 0,
+                    "verdict": "yes" if said_yes else "no",
                 })
             continue
 
@@ -240,6 +279,8 @@ def probe_one(model, tokenizer, loader, obj: str, with_image_token: bool,
             do_sample=False, temperature=None, top_p=None)
         texts = tokenizer.batch_decode(out, skip_special_tokens=True)
         for meta, text in zip(metas, texts):
+            said_yes = int(yes(text))
+            exp = expected_yes_for(obj, meta)
             records.append({
                 "id": meta["id"],
                 "video": video_of(meta),
@@ -247,10 +288,60 @@ def probe_one(model, tokenizer, loader, obj: str, with_image_token: bool,
                 "condition": meta.get("condition", ""),
                 "object": obj,
                 "answer": text.strip()[:160],
-                "halluc": int(yes(text)),
+                "said_yes": said_yes,
+                "expected_yes": exp,
+                "correct": None if exp is None else int(said_yes == exp),
+                "halluc": said_yes if exp == 0 else 0,
                 "verdict": verdict(text),
             })
     return records
+
+
+#: Which categories a run probes.  ``control`` is the read-out validity check:
+#: the submitted three absent categories together with things present in every
+#: frame, so the expected-yes and expected-no rates are measured on the same
+#: frames by the same pass.
+OBJECT_SETS = {
+    "paper": ABSENT_PAPER,
+    "extended": ABSENT_PAPER + ABSENT_EXTRA,
+    "control": ABSENT_PAPER + PRESENT_ALWAYS + [VESSEL_OBJECT],
+    # Present and absent categories are interleaved at the front rather than
+    # grouped.  A pass over the full frame set runs for hours per encoder, and
+    # objects are persisted one at a time, so putting both polarities first
+    # makes the expected-yes minus expected-no gap readable after the opening
+    # objects instead of after the whole pass.  The gap is what decides whether
+    # the rest of the pass is worth its cost, so it has to arrive early.
+    "extended_control": (
+        ["water", "airplane", "sea", "car", VESSEL_OBJECT, "building",
+         "sky", "horizon"]
+        + [o for o in ABSENT_EXTRA]),
+}
+
+
+def discrimination(records: list[dict]) -> dict:
+    """Yes-rate where "yes" is correct against where it is wrong.
+
+    The absent-object rate on its own does not separate a model that sees
+    things that are not there from a model that answers "yes" regardless.  If
+    both rates here are equally high, the read-out has measured a yes-bias and
+    the absent-object rate carries no claim about hallucination.  The gap is
+    reported so that the expensive pass can be read, or discarded, on evidence.
+    """
+    from additional.stats import cluster_proportion
+
+    pos = [r for r in records if r.get("expected_yes") == 1]
+    neg = [r for r in records if r.get("expected_yes") == 0]
+    out: dict = {"n_expected_yes": len(pos), "n_expected_no": len(neg)}
+    if pos:
+        out["yes_rate_where_present"] = cluster_proportion(
+            [r["said_yes"] for r in pos], [r["video"] for r in pos])
+    if neg:
+        out["yes_rate_where_absent"] = cluster_proportion(
+            [r["said_yes"] for r in neg], [r["video"] for r in neg])
+    if pos and neg:
+        out["gap"] = (out["yes_rate_where_present"]["rate"]
+                      - out["yes_rate_where_absent"]["rate"])
+    return out
 
 
 def part_paths(out_dir: str, key: str, obj: str) -> tuple[str, str]:
@@ -299,9 +390,13 @@ def parse_args():
                    help="LABEL=PATH; PATH 'none' keeps the checkpoint's own "
                         "encoder. Repeatable.")
     p.add_argument("--objects", default="paper",
-                   choices=["paper", "extended"],
-                   help="'paper' = the submitted three categories; "
-                        "'extended' = those three plus 17 more")
+                   choices=["paper", "extended", "control",
+                            "extended_control"],
+                   help="'paper' = the submitted three absent categories; "
+                        "'extended' = those three plus 17 more; "
+                        "'control' = the three plus categories present in "
+                        "every frame, to measure whether the read-out "
+                        "discriminates at all; 'extended_control' = both")
     p.add_argument("--image_token_mode", default="with",
                    choices=["with", "without", "both"],
                    help="whether the prompt carries the <image> token that "
@@ -344,8 +439,7 @@ def main():
         samples = samples[:args.limit]
     shard = samples[rank::world]
 
-    objects = (ABSENT_PAPER if args.objects == "paper"
-               else ABSENT_PAPER + ABSENT_EXTRA)
+    objects = OBJECT_SETS[args.objects]
     modes = (["with", "without"] if args.image_token_mode == "both"
              else [args.image_token_mode])
 
@@ -470,6 +564,7 @@ def main():
                             sum(1 for r in merged if r["object"] == o)).as_dict()
                         for o in objects
                     },
+                    "discrimination": discrimination(merged),
                     "probes_path": path_out,
                 }
                 ex = overall["exact_binomial"]
