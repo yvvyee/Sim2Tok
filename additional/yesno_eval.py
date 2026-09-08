@@ -173,8 +173,18 @@ def collate(batch):
 @torch.no_grad()
 def ask_one(model, tokenizer, loader, q: Question, device, dtype,
             yes_ids: list[int], no_ids: list[int],
-            keep_text: int) -> list[dict]:
-    ids_1 = uniform_prompt(tokenizer, q.text, True).to(device)
+            keep_text: int, with_image_token: bool = True) -> list[dict]:
+    """One question over the whole shard.
+
+    ``with_image_token`` decides whether the prompt carries ``<image>``.  The
+    model splices the encoder's output at that token, and without it the
+    features never reach the language model.  Running the pass without the
+    token is the control that shows the encoder cannot influence an answer
+    through any other path: two encoders must then agree on every frame, and a
+    disagreement would mean the evaluation is leaking the encoder somewhere
+    else.
+    """
+    ids_1 = uniform_prompt(tokenizer, q.text, with_image_token).to(device)
     records: list[dict] = []
     for pv, metas in loader:
         if pv is None:
@@ -215,8 +225,13 @@ def ask_one(model, tokenizer, loader, q: Question, device, dtype,
     return records
 
 
-def part_paths(out_dir: str, label: str, q_key: str) -> tuple[str, str]:
-    stem = "ans_" + label + "__" + q_key.replace(":", "_").replace(" ", "_")
+def part_paths(out_dir: str, label: str, q_key: str,
+               mode: str = "with") -> tuple[str, str]:
+    # The mode is part of the name: a with-token and a without-token pass ask
+    # the same question of the same frames and would otherwise overwrite each
+    # other's results, and the resume check would then reuse the wrong one.
+    stem = ("ans_" + label + "__" + mode + "__"
+            + q_key.replace(":", "_").replace(" ", "_"))
     d = os.path.join(out_dir, "parts")
     return os.path.join(d, stem + ".jsonl"), os.path.join(d, stem + ".ok")
 
@@ -319,6 +334,11 @@ def parse_args():
                         "frame's own boxes")
     p.add_argument("--batch_size", type=int, default=16)
     p.add_argument("--num_workers", type=int, default=8)
+    p.add_argument("--image_token_mode", default="with",
+                   choices=["with", "without"],
+                   help="'without' drops the <image> token so the encoder's "
+                        "output never reaches the language model; two "
+                        "encoders must then agree on every frame")
     p.add_argument("--keep_text", type=int, default=4,
                    help="tokens to generate and record; the decision is read "
                         "from the first one regardless")
@@ -386,7 +406,8 @@ def main():
                             pin_memory=True)
 
         for i_q, q in enumerate(questions, 1):
-            p_part, p_ok = part_paths(args.out_dir, label, q.key)
+            p_part, p_ok = part_paths(args.out_dir, label, q.key,
+                                      args.image_token_mode)
             skip = 0
             if rank == 0:
                 skip = 1 if (os.path.exists(p_ok)
@@ -403,7 +424,8 @@ def main():
 
             t0 = time.time()
             recs = ask_one(model, tokenizer, loader, q, device, dtype,
-                           yes_ids, no_ids, args.keep_text)
+                           yes_ids, no_ids, args.keep_text,
+                           args.image_token_mode == "with")
             if distributed:
                 gathered: list[list[dict]] = [None] * world  # type: ignore[list-item]
                 dist.all_gather_object(gathered, recs)
@@ -427,19 +449,23 @@ def main():
         if rank == 0:
             merged: list[dict] = []
             for q in questions:
-                p_part, _ = part_paths(args.out_dir, label, q.key)
+                p_part, _ = part_paths(args.out_dir, label, q.key,
+                                       args.image_token_mode)
                 merged.extend(read_part(p_part))
-            out_path = os.path.join(args.out_dir, f"ans_{label}.jsonl")
+            out_path = os.path.join(
+                args.out_dir, f"ans_{label}__{args.image_token_mode}.jsonl")
             with open(out_path, "w") as f:
                 for r in merged:
                     f.write(json.dumps(r, ensure_ascii=False) + "\n")
             stats = summarise(merged, absent[:3])
             stats["encoder"] = report
+            stats["image_token_mode"] = args.image_token_mode
             stats["answers_path"] = out_path
-            summary[label] = stats
+            summary[f"{label}__{args.image_token_mode}"] = stats
 
             d = stats["discrimination"]
-            print(f"\n[yesno] ===== {label} =====", flush=True)
+            print(f"\n[yesno] ===== {label} "
+                  f"({args.image_token_mode}) =====", flush=True)
             if "gap" in d:
                 print(f"  판별력: 존재 긍정률 {d['yes_rate_present']['rate']*100:.4f}% "
                       f"− 부재 긍정률 {d['yes_rate_absent']['rate']*100:.4f}% "
@@ -459,6 +485,7 @@ def main():
                 "llm": args.llm,
                 "absent_categories": absent, "present_categories": present,
                 "count_thresholds": counts,
+                "image_token_mode": args.image_token_mode,
                 "scoring": ("first generated token, affirmative mass against "
                             "negative mass; the generated string is recorded "
                             "alongside"),
