@@ -59,15 +59,42 @@ def load_attn(path: str, metric: str) -> dict[str, dict]:
     return out
 
 
-def load_probes(path: str) -> dict[str, list[int]]:
+def load_probes(path: str) -> tuple[dict[str, list[int]], dict]:
+    """Per-frame hallucination outcomes, absent categories only.
+
+    A probe file may also contain categories that are present in the frame,
+    which exist to measure whether the read-out discriminates.  Those records
+    carry ``expected_yes == 1`` and their ``halluc`` is 0 by definition, so
+    including them would divide every frame's hallucination count by a larger
+    denominator and pull all rates toward zero by a constant factor.  Since the
+    factor is the same for every frame it would not invert the quintile
+    ordering, but it would make the reported rates unreadable as hallucination
+    rates, so they are dropped and counted.
+
+    Files written before the control categories existed have no
+    ``expected_yes`` field.  Those records are kept, because there the absence
+    of the field means every probe was an absent category.
+    """
     by_frame: dict[str, list[int]] = defaultdict(list)
+    n_kept = n_dropped_present = n_dropped_unknown = 0
     with open(path) as f:
         for line in f:
             if not line.strip():
                 continue
             r = json.loads(line)
+            if "expected_yes" in r:
+                exp = r["expected_yes"]
+                if exp == 1:
+                    n_dropped_present += 1
+                    continue
+                if exp is None:
+                    n_dropped_unknown += 1
+                    continue
             by_frame[r["id"]].append(int(r.get("halluc", 0)))
-    return by_frame
+            n_kept += 1
+    return by_frame, {"n_probes_kept_absent": n_kept,
+                      "n_probes_dropped_present": n_dropped_present,
+                      "n_probes_dropped_unknown_polarity": n_dropped_unknown}
 
 
 def parse_args():
@@ -83,7 +110,7 @@ def parse_args():
 def main():
     args = parse_args()
     attn = load_attn(args.attn, args.metric)
-    probes = load_probes(args.probes)
+    probes, probe_counts = load_probes(args.probes)
 
     frames = []
     for fid, pr in probes.items():
@@ -157,6 +184,7 @@ def main():
         "n_frames_used": n,
         "n_probe_frames_without_score": n_probe_only,
         "n_scored_frames_without_probe": n_attn_only,
+        "probe_selection": probe_counts,
         "quintiles": quintiles,
         "lowest_decile": low_d, "highest_decile": high_d,
         "fisher_low_vs_high_decile": p_fisher,
@@ -171,6 +199,10 @@ def main():
                                "could drive both quantities",
     }
 
+    if probe_counts["n_probes_dropped_present"]:
+        print(f"[link] 부재 범주 프로브 "
+              f"{probe_counts['n_probes_kept_absent']:,}건 사용, "
+              f"존재 범주 {probe_counts['n_probes_dropped_present']:,}건 제외")
     print(f"[link] 프레임 {n:,}개 사용 "
           f"(점수 없는 프로브 프레임 {n_probe_only:,}, "
           f"프로브 없는 채점 프레임 {n_attn_only:,})")
