@@ -74,6 +74,22 @@ ABSENT_EXTRA = [
 
 QUESTION = "Is there a {obj} in this image? Answer yes or no."
 
+#: Surface forms of an affirmative and a negative first token.  Both cases and
+#: both with and without a leading space, because which one the tokeniser emits
+#: depends on the chat template's trailing whitespace.
+_YES_FORMS = ("Yes", " Yes", "yes", " yes", "YES", " YES")
+_NO_FORMS = ("No", " No", "no", " no", "NO", " NO")
+
+
+def _first_token_ids(tokenizer, forms) -> list[int]:
+    """Ids of the first token of each surface form, de-duplicated."""
+    ids = []
+    for f in forms:
+        enc = tokenizer(f, add_special_tokens=False).input_ids
+        if enc:
+            ids.append(enc[0])
+    return sorted(set(ids))
+
 
 #: Words that make an answer affirmative even when it does not start with them.
 _AFFIRM = ("yes", "affirmative", "there is", "there are", "i can see",
@@ -162,7 +178,23 @@ def build_prompt(tokenizer, obj: str, with_image_token: bool) -> torch.Tensor:
 
 @torch.no_grad()
 def probe_one(model, tokenizer, loader, obj: str, with_image_token: bool,
-              device, dtype, max_new: int) -> list[dict]:
+              device, dtype, max_new: int, scoring: str,
+              yes_ids: list[int], no_ids: list[int]) -> list[dict]:
+    """One absence question over the whole shard.
+
+    ``scoring="generate"`` is the submitted protocol: decode greedily and match
+    the text.  It only works on a model that answers the question, and the VLM
+    here does not -- its LoRA was fine-tuned on navigational narration, so it
+    answers "This is a Head-on Situation..." to anything, which the text rule
+    scores as a denial for every probe and makes the measurement vacuous.
+
+    ``scoring="logit"`` reads the same decision one step earlier: the model
+    still has to put probability somewhere at the first generated position, and
+    comparing the mass on affirmative first tokens against negative ones
+    recovers a yes/no decision from a model that would rather narrate.  This is
+    a different read-out from the submitted one and is labelled as such
+    wherever it is reported; the two are never mixed in a table.
+    """
     ids_1 = build_prompt(tokenizer, obj, with_image_token).to(device)
     records: list[dict] = []
     for pv, metas in loader:
@@ -171,6 +203,36 @@ def probe_one(model, tokenizer, loader, obj: str, with_image_token: bool,
         pv = pv.to(device=device, dtype=dtype, non_blocking=True)
         b = pv.shape[0]
         ids = ids_1.expand(b, -1).contiguous()
+
+        if scoring == "logit":
+            out = model.generate(
+                input_ids=ids, attention_mask=torch.ones_like(ids),
+                pixel_values=pv, max_new_tokens=1,
+                do_sample=False, temperature=None, top_p=None,
+                output_scores=True, return_dict_in_generate=True)
+            first = out.scores[0].float()                 # (B, vocab)
+            logp = torch.log_softmax(first, dim=-1)
+            y = torch.logsumexp(logp[:, yes_ids], dim=-1)
+            n = torch.logsumexp(logp[:, no_ids], dim=-1)
+            margin = (y - n).tolist()
+            # Probability of yes conditional on the answer being yes or no.
+            p_yes = torch.sigmoid(y - n).tolist()
+            top = first.argmax(dim=-1).tolist()
+            for meta, m_, p_, t_ in zip(metas, margin, p_yes, top):
+                records.append({
+                    "id": meta["id"],
+                    "video": video_of(meta),
+                    "split": meta.get("split", ""),
+                    "condition": meta.get("condition", ""),
+                    "object": obj,
+                    "answer": tokenizer.decode([t_]).strip()[:32],
+                    "yes_minus_no_logprob": round(m_, 5),
+                    "p_yes_given_binary": round(p_, 6),
+                    "halluc": int(m_ > 0.0),
+                    "verdict": "yes" if m_ > 0.0 else "no",
+                })
+            continue
+
         out = model.generate(
             input_ids=ids, attention_mask=torch.ones_like(ids),
             pixel_values=pv, max_new_tokens=max_new,
@@ -211,6 +273,14 @@ def parse_args():
                    choices=["with", "without", "both"],
                    help="whether the prompt carries the <image> token that "
                         "makes the encoder's output reach the language model")
+    p.add_argument("--scoring", default="generate",
+                   choices=["generate", "logit"],
+                   help="'generate' is the submitted protocol: decode greedily "
+                        "and match the text. 'logit' compares the probability "
+                        "mass on affirmative versus negative first tokens, "
+                        "which recovers a decision from a model whose "
+                        "fine-tuning makes it narrate instead of answering. "
+                        "Different read-outs; never mix them in one table.")
     p.add_argument("--batch_size", type=int, default=8)
     p.add_argument("--num_workers", type=int, default=4)
     p.add_argument("--max_new_tokens", type=int, default=16)
@@ -256,6 +326,13 @@ def main():
     model = build_vlm(args.vlm_ckpt, args.llm, args.vision_model,
                       args.projector_type, dtype, device)
     tokenizer = model.tokenizer
+    yes_ids = _first_token_ids(tokenizer, _YES_FORMS)
+    no_ids = _first_token_ids(tokenizer, _NO_FORMS)
+    if args.scoring == "logit" and not (yes_ids and no_ids):
+        raise RuntimeError("could not resolve yes/no token ids for this "
+                           "tokeniser; logit scoring is not possible")
+    if rank == 0 and args.scoring == "logit":
+        print(f"[probe] yes ids {yes_ids} / no ids {no_ids}", flush=True)
     # Taken before any swap: every --encoder pass mutates this one model in
     # place, so the stock condition is only stock if the weights are restored.
     stock_state = snapshot_encoder(model)
@@ -277,7 +354,8 @@ def main():
             for obj in objects:
                 records.extend(probe_one(model, tokenizer, loader, obj,
                                          mode == "with", device, dtype,
-                                         args.max_new_tokens))
+                                         args.max_new_tokens, args.scoring,
+                                         yes_ids, no_ids))
             if distributed:
                 gathered: list[list[dict]] = [None] * world  # type: ignore[list-item]
                 dist.all_gather_object(gathered, records)
@@ -285,7 +363,7 @@ def main():
             else:
                 merged = records
 
-            key = f"{label}__{mode}"
+            key = f"{label}__{mode}__{args.scoring}"
             if rank == 0:
                 merged.sort(key=lambda r: (r["object"], r["id"]))
                 path_out = os.path.join(args.out_dir, f"probes_{key}.jsonl")
@@ -341,7 +419,13 @@ def main():
             "vision_model": args.vision_model,
             "objects": objects,
             "question": QUESTION,
-            "match_rule": "answer.startswith('yes') or ' yes' in answer[:12]",
+            "scoring": args.scoring,
+            "match_rule": ("answer.startswith('yes') or ' yes' in answer[:12]"
+                           if args.scoring == "generate"
+                           else "logsumexp over yes first-token ids minus the "
+                                "same over no ids, positive counts as yes"),
+            "yes_token_ids": yes_ids,
+            "no_token_ids": no_ids,
             "max_new_tokens": args.max_new_tokens,
             "dtype": args.dtype,
             "batch_size": args.batch_size,

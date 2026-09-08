@@ -223,6 +223,7 @@ checkpoints/
 *.bin
 *.safetensors
 *.pth
+*.pt
 *.gguf
 
 # Hugging Face cache / downloaded models
