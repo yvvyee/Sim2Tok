@@ -185,7 +185,16 @@ class VLMTrainer(Trainer):
         return (loss, outputs) if return_outputs else loss
 
     def _save_checkpoint(self, model, trial):
-        """Save only the components that were trained."""
+        """Save only the components that were trained.
+
+        Note on where these land: ``_get_output_dir(trial)`` is the run's
+        output directory, not the ``checkpoint-N`` subdirectory, so an
+        intermediate save writes ``projector.bin`` and the adapter next to what
+        the final save will write.  A downstream job that waits for
+        ``adapter_model.safetensors`` to appear therefore starts on a
+        partially trained model.  ``vlm_config.json`` is written only by the
+        final save in ``main()`` and is the marker to wait on.
+        """
         checkpoint_dir = self._get_output_dir(trial)
         os.makedirs(checkpoint_dir, exist_ok=True)
 
