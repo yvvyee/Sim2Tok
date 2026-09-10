@@ -84,6 +84,12 @@ def parse_args():
     p.add_argument("--lr_scheduler", default="cosine",
                    choices=["cosine", "linear", "constant"])
     p.add_argument("--save_steps",    type=int, default=500)
+    p.add_argument("--seed", type=int, default=42,
+                   help="Seed passed to TrainingArguments. It governs batch "
+                        "composition and dropout, not the adapter init when "
+                        "--resume_lora_path carries an existing adapter, so "
+                        "repeating a run with different seeds tests whether a "
+                        "result survives data-order and dropout variation.")
     p.add_argument("--save_total_limit", type=int, default=None,
                    help="Keep at most this many step checkpoints, deleting the "
                         "oldest. Each one carries the optimiser state for the "
@@ -453,6 +459,7 @@ def main():
         save_strategy="steps",
         save_steps=args.save_steps,
         save_total_limit=args.save_total_limit,
+        seed=args.seed,
         max_steps=args.max_steps,
         logging_steps=args.logging_steps,
         report_to=report_to,
