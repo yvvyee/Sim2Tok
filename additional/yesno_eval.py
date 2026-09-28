@@ -80,6 +80,52 @@ DTYPES = {"float32": torch.float32, "float16": torch.float16,
 QUESTION_OBJ = "Is there a {obj} in this image? Answer yes or no."
 QUESTION_COUNT = ("Are there more than {n} vessels in this image? "
                   "Answer yes or no.")
+QUESTION_SIDE = ("Is the largest vessel on the {side} side of the image? "
+                 "Answer yes or no.")
+
+
+def _area(b):
+    return max(0.0, b[2] - b[0]) * max(0.0, b[3] - b[1])
+
+
+def visible_boxes(meta: dict) -> list:
+    """Vessel boxes graded against, set once per record by ``attach_visible``."""
+    return meta.get("_vis", meta.get("bboxes") or [])
+
+
+def attach_visible(samples: list[dict], geometry: str) -> None:
+    """Store the boxes a question is graded against on every record.
+
+    ``raw`` keeps full-frame boxes, as every earlier run did.  ``cropped``
+    keeps only what survives the CLIP centre crop, in crop coordinates, which
+    is what the model is actually shown; a vessel the crop removes cannot be
+    counted, located, or expected to be seen.
+    """
+    from additional.box_geometry import transform_boxes
+    for s_ in samples:
+        b = s_.get("bboxes") or []
+        s_["_vis"] = (transform_boxes(b, s_.get("width", 1920),
+                                      s_.get("height", 1080))
+                      if geometry == "cropped" else b)
+
+
+def _vessel_expect(m: dict):
+    if not m.get("vessel_labelled", True):
+        return None
+    return int(len(visible_boxes(m)) > 0)
+
+
+def _side_expect(side: str):
+    def f(m: dict):
+        if not m.get("vessel_labelled", True):
+            return None
+        vis = visible_boxes(m)
+        if not vis:
+            return None
+        big = max(vis, key=_area)
+        cx = (big[0] + big[2]) / 2
+        return int(("left" if cx < 0.5 else "right") == side)
+    return f
 
 _YES_FORMS = ("Yes", " Yes", "yes", " yes", "YES", " YES")
 _NO_FORMS = ("No", " No", "no", " no", "NO", " NO")
@@ -108,7 +154,8 @@ class Question:
 
 
 def build_questions(absent: list[str], present: list[str],
-                    counts: list[int]) -> list[Question]:
+                    counts: list[int], vessel_words: list[str] = (),
+                    sides: list[str] = ()) -> list[Question]:
     """Interleave the families so both polarities appear in the first results.
 
     A pass over the full frame set runs for hours per encoder and questions are
@@ -128,14 +175,21 @@ def build_questions(absent: list[str], present: list[str],
             f"count:{n}", "count", QUESTION_COUNT.format(n=n),
             # Bind n per question; a closure over the loop variable would make
             # every count question grade against the last threshold.
-            (lambda n_: (lambda m: int(len(m.get("bboxes") or []) > n_)))(n)))
+            (lambda n_: (lambda m: None if not m.get("vessel_labelled", True)
+                         else int(len(visible_boxes(m)) > n_)))(n)))
+    for w in vessel_words:
+        qs.append(Question(f"vessel:{w}", "vessel",
+                           QUESTION_OBJ.format(obj=w), _vessel_expect))
+    for sd in sides:
+        qs.append(Question(f"side:{sd}", "side",
+                           QUESTION_SIDE.format(side=sd), _side_expect(sd)))
 
     # One from each family first, then the rest, so the gap is readable early.
     order: list[Question] = []
-    pools = {f: [q for q in qs if q.family == f]
-             for f in ("absent", "present", "count")}
+    fams = ("present", "absent", "vessel", "count", "side")
+    pools = {f: [q for q in qs if q.family == f] for f in fams}
     while any(pools.values()):
-        for f in ("present", "absent", "count"):
+        for f in fams:
             if pools[f]:
                 order.append(pools[f].pop(0))
     return order
@@ -205,12 +259,19 @@ def ask_one(model, tokenizer, loader, q: Question, device, dtype,
         for meta, m_, t_ in zip(metas, margin, texts):
             said_yes = int(m_ > 0.0)
             exp = q.expected(meta)
+            if exp is None:
+                # The answer is undefined for this frame (no vessel labels, or
+                # no visible vessel for a side question); asking it would add a
+                # record that no rate can use.
+                continue
             records.append({
                 "id": meta["id"],
                 "video": video_of(meta),
                 "split": meta.get("split", ""),
                 "condition": meta.get("condition", ""),
                 "n_boxes": len(meta.get("bboxes") or []),
+                "n_visible": len(visible_boxes(meta)),
+                "dataset": meta.get("dataset", ""),
                 "question": q.key,
                 "family": q.family,
                 "said_yes": said_yes,
@@ -344,6 +405,15 @@ def parse_args():
     p.add_argument("--present", default="water,sky",
                    help="categories present in every frame, for the "
                         "discrimination control")
+    p.add_argument("--vessel_words", default="",
+                   help="comma list; asks 'Is there a {w} in this image?' "
+                        "graded by whether a vessel is visible")
+    p.add_argument("--sides", default="",
+                   help="comma list of left,right; asks which side of the "
+                        "image the largest visible vessel is on")
+    p.add_argument("--box_geometry", default="raw", choices=["raw", "cropped"],
+                   help="coordinate frame the vessel-based answers are graded "
+                        "in; 'cropped' uses only what the centre crop shows")
     p.add_argument("--counts", default="3,7",
                    help="vessel-count thresholds; the answer comes from the "
                         "frame's own boxes")
@@ -387,12 +457,15 @@ def main():
         samples = json.load(f)
     if args.limit > 0:
         samples = samples[:args.limit]
+    attach_visible(samples, args.box_geometry)
     shard = samples[rank::world]
 
     absent = [s.strip() for s in args.absent.split(",") if s.strip()]
     present = [s.strip() for s in args.present.split(",") if s.strip()]
     counts = [int(s) for s in args.counts.split(",") if s.strip()]
-    questions = build_questions(absent, present, counts)
+    vessel_words = [s.strip() for s in args.vessel_words.split(",") if s.strip()]
+    sides = [s.strip() for s in args.sides.split(",") if s.strip()]
+    questions = build_questions(absent, present, counts, vessel_words, sides)
 
     if rank == 0:
         os.makedirs(os.path.join(args.out_dir, "parts"), exist_ok=True)
