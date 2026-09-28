@@ -280,8 +280,12 @@ def main():
             pv = pv.to(device=device, dtype=dtype, non_blocking=True)
             attn = cls_attention(model, pv, feature_size)
             if args.box_geometry == "cropped":
-                boxes = [transform_boxes(m["bboxes"], args.image_w,
-                                         args.image_h) for m in metas]
+                # Per-record size wins: the real-data corpora mix resolutions
+                # within one file.  Records without it fall back to the flags.
+                boxes = [transform_boxes(m["bboxes"],
+                                         m.get("width", args.image_w),
+                                         m.get("height", args.image_h))
+                         for m in metas]
             else:
                 boxes = [m["bboxes"] for m in metas]
             fg = compute_geometric_mask(boxes, feature_size, device,
