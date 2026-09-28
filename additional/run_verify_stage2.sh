@@ -45,6 +45,26 @@ if [ ! -f "$ENC_M3_DIR/vision_encoder.bin" ]; then
 fi
 ENC_M3="$ENC_M3_DIR/vision_encoder.bin"
 
+# H1a control: alignment of the shuffled-box encoder on the same real sets.
+# If it rose as much as the GAA encoder, the stage-1 gain would not show that
+# the encoder learned to look at vessels.
+h1a_eval () {  # $1=out tag $2=data $3=image dir $4=tau
+  local OUTD="$ROOT/results/verify_s1/$1"
+  [ -f "$OUTD/summary.json" ] && return 0
+  say "H1a eval shuffled encoder: $1"
+  $BIN/torchrun --nproc_per_node 4 --master_port 29633 -m additional.eval_attn_mp \
+    --data_path "$2" --image_dir "$3" \
+    --ckpt stock=none --ckpt shuf_crop_n10000="$ENC_M3" \
+    --geo_tau "$4" --box_geometry cropped --image_w 1920 --image_h 1080 \
+    --out_dir "$OUTD" >> "$LOG" 2>&1 || say "H1a EVAL FAILED $1"
+}
+h1a_eval shuf_smd_full_t05 "$ROOT/data/smd_full.json" "$ROOT/frames" 0.5
+for DS in mcad_rgb mcad_ir lars seadronessee; do
+  for TAU in 0.5 0.01; do
+    h1a_eval "shuf_${DS}_t${TAU/./}" "$ROOT/data/real/$DS.json" "$REAL" "$TAU"
+  done
+done
+
 # ---------------------------------------------------------------- SFT data
 until [ -f "$ROOT/aivn_crops/crops.json" ]; do sleep 60; done
 if [ ! -f "$ROOT/data/vlm_sft_v2_train.json" ]; then
