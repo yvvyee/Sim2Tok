@@ -66,10 +66,18 @@ def main():
     p.add_argument("--out", required=True)
     p.add_argument("--n_boot", type=int, default=2000)
     p.add_argument("--seed", type=int, default=0)
+    p.add_argument("--exclude_empty", action="store_true",
+                   help="drop frames whose foreground mask is empty in either "
+                        "file (fg_patches == 0); with --box_geometry cropped "
+                        "these are frames whose every vessel lies outside the "
+                        "centre crop, where both measures are undefined")
     args = p.parse_args()
 
     a, b = load(args.a), load(args.b)
     ids = sorted(set(a) & set(b))
+    n_before = len(ids)
+    if args.exclude_empty:
+        ids = [i for i in ids if a[i]["fg_patches"] > 0 and b[i]["fg_patches"] > 0]
     videos = {}
     for i in ids:
         videos.setdefault(a[i]["video"], []).append(i)
@@ -79,7 +87,8 @@ def main():
     boots = [[i for v in rng.choices(vlist, k=len(vlist)) for i in videos[v]]
              for _ in range(args.n_boot)]
 
-    res = {"n_frames": len(ids), "n_videos": len(vlist),
+    res = {"n_frames": len(ids), "n_frames_before_exclusion": n_before,
+           "n_videos": len(vlist),
            "a": args.a, "b": args.b, "n_boot": args.n_boot, "seed": args.seed,
            "uniform_attn_in_box": sum(a[i]["fg_patches"] for i in ids) / len(ids) / N_PATCHES}
     for f in FIELDS:

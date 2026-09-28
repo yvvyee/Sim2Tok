@@ -53,6 +53,7 @@ from torch.utils.data import Dataset, DataLoader, DistributedSampler
 
 from additional.config import assert_policy_or_die
 from gaa.geometric_loss import compute_geometric_mask
+from additional.box_geometry import transform_boxes
 from gaa.geo_losses import VARIANTS, extract_cls_attn, geo_loss
 
 DTYPES = {"float32": torch.float32, "float16": torch.float16,
@@ -69,13 +70,17 @@ class GeoTrainSet(Dataset):
     the encoder toward attending nowhere.
     """
 
-    def __init__(self, data_path: str, image_dir: str, processor):
+    def __init__(self, data_path: str, image_dir: str, processor,
+                 box_geometry: str = "raw", image_w: int = 1920,
+                 image_h: int = 1080):
         with open(data_path) as f:
             raw = json.load(f)
         self.samples = [s for s in raw if s.get("bboxes")]
         self.n_dropped_no_box = len(raw) - len(self.samples)
         self.image_dir = image_dir
         self.processor = processor
+        self.box_geometry = box_geometry
+        self.image_w, self.image_h = image_w, image_h
 
     def __len__(self) -> int:
         return len(self.samples)
@@ -90,7 +95,14 @@ class GeoTrainSet(Dataset):
         except (OSError, ValueError):
             return None
         pv = self.processor(images=image, return_tensors="pt").pixel_values[0]
-        return pv, s["bboxes"]
+        boxes = s["bboxes"]
+        if self.box_geometry == "cropped":
+            # Lay the target on the pixels the encoder receives.  Boxes that
+            # the centre crop removes are dropped; if none survives, the mask
+            # comes out empty and the loop below counts it as empty_mask.
+            boxes = transform_boxes(boxes, s.get("width", self.image_w),
+                                    s.get("height", self.image_h))
+        return pv, boxes
 
 
 def collate(batch):
@@ -129,6 +141,14 @@ def parse_args():
     p.add_argument("--per_device_batch", type=int, default=8)
     p.add_argument("--num_workers", type=int, default=8)
     p.add_argument("--geo_tau", type=float, default=0.5)
+    p.add_argument("--box_geometry", default="raw", choices=["raw", "cropped"],
+                   help="'raw' lays full-frame boxes on the grid unchanged, as "
+                        "every earlier run did; 'cropped' maps them into the "
+                        "centre crop the encoder actually sees")
+    p.add_argument("--image_w", type=int, default=1920,
+                   help="source width when a record has no 'width'")
+    p.add_argument("--image_h", type=int, default=1080,
+                   help="source height when a record has no 'height'")
     p.add_argument("--margin", type=float, default=0.0,
                    help="only used by the fg_bg_margin variant")
     p.add_argument("--grad_clip", type=float, default=1.0)
@@ -169,7 +189,9 @@ def main():
     encoder.train()
     processor = CLIPImageProcessor.from_pretrained(args.vision_model)
 
-    dataset = GeoTrainSet(args.data_path, args.image_dir, processor)
+    dataset = GeoTrainSet(args.data_path, args.image_dir, processor,
+                          box_geometry=args.box_geometry,
+                          image_w=args.image_w, image_h=args.image_h)
     sampler = (DistributedSampler(dataset, num_replicas=world, rank=rank,
                                   shuffle=True, seed=args.seed)
                if distributed else None)
@@ -383,6 +405,7 @@ def main():
             "effective_batch": world * args.per_device_batch,
             "world_size": world,
             "geo_tau": args.geo_tau,
+            "box_geometry": args.box_geometry,
             "dtype": args.dtype,
             "seed": args.seed,
             "n_samples": len(dataset),
