@@ -25,6 +25,10 @@ export CUDA_VISIBLE_DEVICES=2,3,4,5
 SEEDS=${SEEDS:-0}
 LOG="$ROOT/logs/verify_stage2.log"
 say () { echo "[$(date '+%F %T')] $*" | tee -a "$LOG"; }
+# Run a job; if it fails (for example a DataLoader worker timed out), run it
+# once more.  Evaluators resume from their part files, so a retry repeats only
+# the unfinished questions.
+twice () { "$@" && return 0; say "retrying after failure: ${*: -2}"; "$@"; }
 
 enc_train () {  # $1=out dir $2=data json $3=seed
   [ -f "$1/vision_encoder.bin" ] && return 0
@@ -39,7 +43,7 @@ enc_h1a () {  # $1=tag $2=label $3=encoder path
   local run
   run () {  # $1=outdir $2=data $3=image dir $4=tau
     [ -f "$1/summary.json" ] && return 0
-    $BIN/torchrun --nproc_per_node 4 --master_port 29652 -m additional.eval_attn_mp \
+    twice $BIN/torchrun --nproc_per_node 4 --master_port 29652 -m additional.eval_attn_mp \
       --data_path "$2" --image_dir "$3" --ckpt stock=none --ckpt "$ENC_LABEL=$ENC_PATH" \
       --geo_tau "$4" --box_geometry cropped --image_w 1920 --image_h 1080 \
       --out_dir "$1" >> "$LOG" 2>&1 || say "H1a EVAL FAILED $1"
@@ -121,7 +125,7 @@ eval_vlm () {  # $1=name $2=seed
     local OUTD="$ROOT/results/verify_s2/$1_s$2/$DS"
     say "eval $1 s$2 on $DS"
     local T0=$(date +%s)
-    $BIN/torchrun --nproc_per_node 4 --master_port 29642 -m additional.yesno_eval \
+    twice $BIN/torchrun --nproc_per_node 4 --master_port 29642 -m additional.yesno_eval \
       --data_path "$DATA" --image_dir "$IMG" --vlm_ckpt "$CK" --llm "$LLM" \
       --encoder "$1=$ENC" --box_geometry cropped \
       --vessel_words ship --sides left,right --counts 1,3 \

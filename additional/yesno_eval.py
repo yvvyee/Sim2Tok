@@ -419,6 +419,9 @@ def parse_args():
                         "frame's own boxes")
     p.add_argument("--batch_size", type=int, default=16)
     p.add_argument("--num_workers", type=int, default=8)
+    p.add_argument("--loader_timeout", type=float, default=900.0,
+                   help="seconds a DataLoader worker may take for one batch "
+                        "before the job fails instead of hanging")
     p.add_argument("--image_token_mode", default="with",
                    choices=["with", "without"],
                    help="'without' drops the <image> token so the encoder's "
@@ -496,7 +499,11 @@ def main():
         loader = DataLoader(FrameOnly(shard, args.image_dir, processor),
                             batch_size=args.batch_size, shuffle=False,
                             num_workers=args.num_workers, collate_fn=collate,
-                            pin_memory=True)
+                            pin_memory=True,
+                            # See eval_attn_mp: a deadlocked worker must fail
+                            # the job, not stall every rank at the gather.
+                            timeout=(args.loader_timeout
+                                     if args.num_workers > 0 else 0))
 
         for i_q, q in enumerate(questions, 1):
             p_part, p_ok = part_paths(args.out_dir, label, q.key,

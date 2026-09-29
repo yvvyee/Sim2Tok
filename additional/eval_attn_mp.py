@@ -222,6 +222,9 @@ def parse_args():
     p.add_argument("--feature_size", type=int, default=-1)
     p.add_argument("--batch_size", type=int, default=16)
     p.add_argument("--num_workers", type=int, default=8)
+    p.add_argument("--loader_timeout", type=float, default=900.0,
+                   help="seconds a DataLoader worker may take for one batch "
+                        "before the job fails instead of hanging")
     p.add_argument("--dtype", default="float32", choices=sorted(DTYPES))
     p.add_argument("--limit", type=int, default=-1,
                    help="evaluate only the first N samples (smoke tests)")
@@ -271,6 +274,11 @@ def main():
             batch_size=args.batch_size, shuffle=False,
             num_workers=args.num_workers, collate_fn=collate,
             pin_memory=True,
+            # A worker that deadlocks (seen on 2026-09-29: one worker stuck in
+            # a futex for ten hours) would otherwise hold every other rank at
+            # the gather forever.  With a timeout the rank raises, torchrun
+            # fails the job, and the queue retries it.
+            timeout=args.loader_timeout if args.num_workers > 0 else 0,
         )
 
         records: list[dict] = []
