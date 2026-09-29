@@ -11,7 +11,9 @@
 #   M1  GAA inbox_ce encoder trained with crop-frame masks, frozen
 #   M3  inbox_ce encoder trained on shuffled boxes (crop frame), frozen
 #
-# SEEDS selects the seeds to run (default "0"); the first pass measures time.
+# SEEDS selects the seeds to run (default "0").  For every seed the GAA and
+# shuffled-box encoders are trained with that seed (seed 0 reuses the stage-1
+# encoders), and seeds other than 0 also get the stage-1 alignment evaluation.
 set -u
 ROOT=/mnt/ssd1/yvvyee/gaa_additional
 cd "$ROOT/src"
@@ -24,46 +26,40 @@ SEEDS=${SEEDS:-0}
 LOG="$ROOT/logs/verify_stage2.log"
 say () { echo "[$(date '+%F %T')] $*" | tee -a "$LOG"; }
 
-ENC_M1="$ROOT/checkpoints/crop_n10000_s0/vision_encoder.bin"
-ENC_M3_DIR="$ROOT/checkpoints/shuf_crop_n10000_s0"
+enc_train () {  # $1=out dir $2=data json $3=seed
+  [ -f "$1/vision_encoder.bin" ] && return 0
+  say "train encoder $(basename $1)"
+  $BIN/torchrun --nproc_per_node 4 --master_port 29651 -m additional.train_geo_ddp \
+    --data_path "$2" --image_dir "$ROOT/aivn_correct/png" --output_dir "$1" \
+    --variant inbox_ce --lam 1.0 --epochs 5 --lr 1e-5 --weight_decay 0.01 \
+    --per_device_batch 8 --geo_tau 0.01 --seed "$3" --dtype float32 \
+    --box_geometry cropped >> "$LOG" 2>&1 || { say "ENCODER FAILED $1"; return 1; }
+}
+enc_h1a () {  # $1=tag $2=label $3=encoder path
+  local run
+  run () {  # $1=outdir $2=data $3=image dir $4=tau
+    [ -f "$1/summary.json" ] && return 0
+    $BIN/torchrun --nproc_per_node 4 --master_port 29652 -m additional.eval_attn_mp \
+      --data_path "$2" --image_dir "$3" --ckpt stock=none --ckpt "$ENC_LABEL=$ENC_PATH" \
+      --geo_tau "$4" --box_geometry cropped --image_w 1920 --image_h 1080 \
+      --out_dir "$1" >> "$LOG" 2>&1 || say "H1a EVAL FAILED $1"
+  }
+  ENC_LABEL=$2; ENC_PATH=$3
+  say "H1a eval $1"
+  run "$ROOT/results/verify_s1/$1_smd_full_t05" "$ROOT/data/smd_full.json" "$ROOT/frames" 0.5
+  for DS in mcad_rgb mcad_ir lars seadronessee; do
+    for TAU in 0.5 0.01; do
+      run "$ROOT/results/verify_s1/$1_${DS}_t${TAU/./}" "$ROOT/data/real/$DS.json" "$REAL" "$TAU"
+    done
+  done
+}
 
-# ---------------------------------------------------------------- M3 encoder
+# ---------------------------------------------------------------- shuffled data
 if [ ! -f "$ROOT/data/aivn_10k_shuffled.json" ]; then
-  say "make shuffled boxes"
   $BIN/python -m additional.make_shuffled_boxes \
     --in_json "$ROOT/data/ok_aivn_10000.json" \
     --out_json "$ROOT/data/aivn_10k_shuffled.json" --seed 0 >> "$LOG" 2>&1
 fi
-if [ ! -f "$ENC_M3_DIR/vision_encoder.bin" ]; then
-  say "train shuffled-box encoder"
-  $BIN/torchrun --nproc_per_node 4 --master_port 29631 -m additional.train_geo_ddp \
-    --data_path "$ROOT/data/aivn_10k_shuffled.json" \
-    --image_dir "$ROOT/aivn_correct/png" --output_dir "$ENC_M3_DIR" \
-    --variant inbox_ce --lam 1.0 --epochs 5 --lr 1e-5 --weight_decay 0.01 \
-    --per_device_batch 8 --geo_tau 0.01 --seed 0 --dtype float32 \
-    --box_geometry cropped >> "$LOG" 2>&1 || { say "M3 ENCODER FAILED"; exit 1; }
-fi
-ENC_M3="$ENC_M3_DIR/vision_encoder.bin"
-
-# H1a control: alignment of the shuffled-box encoder on the same real sets.
-# If it rose as much as the GAA encoder, the stage-1 gain would not show that
-# the encoder learned to look at vessels.
-h1a_eval () {  # $1=out tag $2=data $3=image dir $4=tau
-  local OUTD="$ROOT/results/verify_s1/$1"
-  [ -f "$OUTD/summary.json" ] && return 0
-  say "H1a eval shuffled encoder: $1"
-  $BIN/torchrun --nproc_per_node 4 --master_port 29633 -m additional.eval_attn_mp \
-    --data_path "$2" --image_dir "$3" \
-    --ckpt stock=none --ckpt shuf_crop_n10000="$ENC_M3" \
-    --geo_tau "$4" --box_geometry cropped --image_w 1920 --image_h 1080 \
-    --out_dir "$OUTD" >> "$LOG" 2>&1 || say "H1a EVAL FAILED $1"
-}
-h1a_eval shuf_smd_full_t05 "$ROOT/data/smd_full.json" "$ROOT/frames" 0.5
-for DS in mcad_rgb mcad_ir lars seadronessee; do
-  for TAU in 0.5 0.01; do
-    h1a_eval "shuf_${DS}_t${TAU/./}" "$ROOT/data/real/$DS.json" "$REAL" "$TAU"
-  done
-done
 
 # ---------------------------------------------------------------- SFT data
 until [ -f "$ROOT/aivn_crops/crops.json" ]; do sleep 60; done
@@ -137,8 +133,13 @@ eval_vlm () {  # $1=name $2=seed
 }
 
 for S in $SEEDS; do
-  train_vlm M0 "$S" ""          && eval_vlm M0 "$S"
-  train_vlm M1 "$S" "$ENC_M1"   && eval_vlm M1 "$S"
-  train_vlm M3 "$S" "$ENC_M3"   && eval_vlm M3 "$S"
+  E1="$ROOT/checkpoints/crop_n10000_s$S"; E3="$ROOT/checkpoints/shuf_crop_n10000_s$S"
+  enc_train "$E1" "$ROOT/data/ok_aivn_10000.json" "$S" || continue
+  enc_train "$E3" "$ROOT/data/aivn_10k_shuffled.json" "$S" || continue
+  [ "$S" != 0 ] && enc_h1a "s${S}" "crop_n10000" "$E1/vision_encoder.bin"
+  [ "$S" != 0 ] && enc_h1a "shuf_s${S}" "shuf_crop_n10000" "$E3/vision_encoder.bin"
+  train_vlm M0 "$S" ""                         && eval_vlm M0 "$S"
+  train_vlm M1 "$S" "$E1/vision_encoder.bin"   && eval_vlm M1 "$S"
+  train_vlm M3 "$S" "$E3/vision_encoder.bin"   && eval_vlm M3 "$S"
 done
 say "VERIFY_STAGE2_DONE seeds=$SEEDS"
