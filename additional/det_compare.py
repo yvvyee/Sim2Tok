@@ -39,27 +39,58 @@ def ap(scores, tps, n_gt):
     return float(np.sum((r[1:] - r[:-1]) * prec))
 
 
+NBIN = 1000
+
+
+def ap_hist(htp, hfp, n_gt):
+    """AP from score histograms (bin 0 = lowest score); scores within a bin tie."""
+    if n_gt == 0:
+        return None
+    tp, fp = np.cumsum(htp[::-1]), np.cumsum(hfp[::-1])
+    rec = tp / n_gt
+    prec = tp / np.maximum(tp + fp, 1e-12)
+    prec = np.maximum.accumulate(prec[::-1])[::-1]
+    r = np.concatenate([[0.0], rec])
+    return float(np.sum((r[1:] - r[:-1]) * prec))
+
+
 class Units:
+    """Per-video score histograms of true and false positives at IoU 0.5 / 0.75.
+
+    Scores lie in [0, 1]; with 1,000 bins, ties inside a bin change AP by far
+    less than the bootstrap spread, and a draw becomes a sum of histograms.
+    """
+
     def __init__(self, rows):
         g = collections.defaultdict(list)
         for r in rows:
             g[r["video"]].append(r)
         self.keys = sorted(g)
-        self.s, self.t50, self.t75, self.n = {}, {}, {}, {}
+        self.h, self.n = {}, {}
         for u, rs in g.items():
-            self.s[u] = np.concatenate([np.asarray(r["scores"], float) for r in rs]) if rs else np.zeros(0)
-            self.t50[u] = np.concatenate([np.asarray(r["tp50"], float) for r in rs])
-            self.t75[u] = np.concatenate([np.asarray(r["tp75"], float) for r in rs])
+            s = np.concatenate([np.asarray(r["scores"], float) for r in rs])
+            b = np.clip((s * NBIN).astype(int), 0, NBIN - 1)
+            h = {}
+            for k in ("tp50", "tp75", "tpc"):
+                if k not in rs[0]:
+                    continue
+                t = np.concatenate([np.asarray(r[k], float) for r in rs])
+                h[k] = (np.bincount(b, weights=t, minlength=NBIN),
+                        np.bincount(b, weights=1 - t, minlength=NBIN))
+            self.h[u] = h
             self.n[u] = sum(r["n_gt"] for r in rs)
 
     def metrics(self, draw):
-        s = np.concatenate([self.s[u] for u in draw])
         n = sum(self.n[u] for u in draw)
         out = {}
-        for k, t in (("ap50", self.t50), ("ap75", self.t75)):
-            v = ap(s, np.concatenate([t[u] for u in draw]), n)
+        for k, name in (("tp50", "ap50"), ("tp75", "ap75"), ("tpc", "ap_center")):
+            if k not in self.h[draw[0]]:
+                continue
+            htp = np.sum([self.h[u][k][0] for u in draw], axis=0)
+            hfp = np.sum([self.h[u][k][1] for u in draw], axis=0)
+            v = ap_hist(htp, hfp, n)
             if v is not None:
-                out[k] = v
+                out[name] = v
         return out
 
 
@@ -91,7 +122,7 @@ def main():
         sim = res["per_encoder"][lb]["aivn_val"]
         for s in sets:
             if s != "aivn_val":
-                for k in ("ap50", "ap75"):
+                for k in ("ap50", "ap75", "ap_center"):
                     if k in sim and k in res["per_encoder"][lb][s]:
                         res["per_encoder"][lb][s]["gap_" + k] = sim[k] - res["per_encoder"][lb][s][k]
     for lb in args.cmp:

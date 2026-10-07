@@ -194,6 +194,24 @@ def match(dets, gts, thr):
     return tp
 
 
+def match_center(dets, gts):
+    """Greedy by score: a detection is a hit when its center lies inside a
+    not-yet-matched ground-truth box.  Insensitive to the predicted size."""
+    used, tp = set(), []
+    for d in dets:
+        cx, cy = (d[1] + d[3]) / 2, (d[2] + d[4]) / 2
+        hit = -1
+        for j, g in enumerate(gts):
+            if j not in used and g[0] <= cx <= g[2] and g[1] <= cy <= g[3]:
+                hit = j
+                break
+        if hit >= 0:
+            used.add(hit); tp.append(1)
+        else:
+            tp.append(0)
+    return tp
+
+
 def main():
     p = argparse.ArgumentParser()
     p.add_argument("--encoder", required=True)
@@ -212,6 +230,8 @@ def main():
     p.add_argument("--num_workers", type=int, default=8)
     p.add_argument("--min_score", type=float, default=0.01)
     p.add_argument("--seed", type=int, default=0)
+    p.add_argument("--eval_only", action="store_true",
+                   help="load det_head.bin from out_dir and only evaluate")
     args = p.parse_args()
 
     distributed = "RANK" in os.environ and int(os.environ.get("WORLD_SIZE", 1)) > 1
@@ -262,6 +282,9 @@ def main():
               f"batch {world * args.per_device_batch}", flush=True)
     step, epoch, t0 = 0, 0, time.time()
     head_ddp.train()
+    if args.eval_only:
+        head.load_state_dict(torch.load(os.path.join(args.out_dir, "det_head.bin"), map_location=device))
+        step = args.head_steps
     while step < args.head_steps:
         if sampler is not None:
             sampler.set_epoch(epoch)
@@ -283,7 +306,7 @@ def main():
                 break
         epoch += 1
     head.eval()
-    if rank == 0:
+    if rank == 0 and not args.eval_only:
         torch.save(head.state_dict(), os.path.join(args.out_dir, "det_head.bin"))
 
     sets = [("aivn_val", sim_items(args, "val"))]
@@ -312,7 +335,8 @@ def main():
                 d = d[np.argsort(-d[:, 0])].tolist()
                 rows.append({"id": it["id"], "video": it["video"], "dataset": name,
                              "n_gt": len(gts), "scores": [round(x[0], 5) for x in d],
-                             "tp50": match(d, gts, 0.5), "tp75": match(d, gts, 0.75)})
+                             "tp50": match(d, gts, 0.5), "tp75": match(d, gts, 0.75),
+                             "tpc": match_center(d, gts)})
         part = os.path.join(args.out_dir, f"{name}.rank{rank}.jsonl")
         with open(part, "w") as f:
             for r in rows:
