@@ -144,10 +144,11 @@ def load_encoder(vision_model: str, ckpt: str | None, dtype, device):
 
 
 @torch.no_grad()
-def cls_attention(model, pixel_values, feature_size: int) -> torch.Tensor:
-    """Head-averaged last-layer CLS->patch attention, shaped ``(B, F, F)``."""
+def cls_attention(model, pixel_values, feature_size: int,
+                  layer: int = -1) -> torch.Tensor:
+    """Head-averaged CLS->patch attention of ``layer``, shaped ``(B, F, F)``."""
     out = model(pixel_values=pixel_values, output_attentions=True)
-    attn = out.attentions[-1]                    # (B, H, N+1, N+1)
+    attn = out.attentions[layer]                 # (B, H, N+1, N+1)
     cls = attn[:, :, 0, 1:].mean(dim=1)          # (B, N) averaged over heads
     B = cls.shape[0]
     return cls.reshape(B, feature_size, feature_size).float()
@@ -220,6 +221,8 @@ def parse_args():
     p.add_argument("--image_h", type=int, default=1080,
                    help="source frame height, used only by --box_geometry cropped")
     p.add_argument("--feature_size", type=int, default=-1)
+    p.add_argument("--attn_layer", type=int, default=-1,
+                   help="attentions index; -2 is the layer-23 class token")
     p.add_argument("--batch_size", type=int, default=16)
     p.add_argument("--num_workers", type=int, default=8)
     p.add_argument("--loader_timeout", type=float, default=900.0,
@@ -286,7 +289,7 @@ def main():
             if pv is None:
                 continue
             pv = pv.to(device=device, dtype=dtype, non_blocking=True)
-            attn = cls_attention(model, pv, feature_size)
+            attn = cls_attention(model, pv, feature_size, args.attn_layer)
             if args.box_geometry == "cropped":
                 # Per-record size wins: the real-data corpora mix resolutions
                 # within one file.  Records without it fall back to the flags.

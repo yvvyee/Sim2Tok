@@ -7,7 +7,8 @@ the dataset roots on both machines, the image geometry, and the random seeds.
 GPU policy
 ----------
 The remote host TG-A40G carries six A100-PCIE-40GB cards.  Cards 0 and 1 are
-reserved for other users and must never be touched.  ``CUDA_DEVICES`` is the
+reserved for other users and must never be touched.  Since 2026-10-08 card 5
+is excluded as well, so the study runs on cards 2, 3 and 4.  ``CUDA_DEVICES`` is the
 only place that set is written down, and ``cuda_env()`` is the only supported
 way to build the environment for a subprocess.  Both refuse to emit a device
 list that contains a reserved card, so a typo in a run script fails loudly
@@ -21,7 +22,7 @@ from dataclasses import dataclass, field
 # ── GPU policy ───────────────────────────────────────────────────────────────
 
 #: Physical GPU indices this study is allowed to use.
-CUDA_DEVICES: tuple[int, ...] = (2, 3, 4, 5)
+CUDA_DEVICES: tuple[int, ...] = (2, 3, 4)
 
 #: Physical GPU indices reserved for other users.  Never schedule work here.
 RESERVED_DEVICES: frozenset[int] = frozenset({0, 1})

@@ -16,6 +16,17 @@ Only the vision encoder is trained.  The loss is ``L_geo`` alone, which is the
 paper's vision-only stage; the projector and language model are untouched here
 and are fine-tuned separately in the two-stage recipe.
 
+Additions for the revision runs:
+
+* ``--crops_json``/``--crop_dir`` add the vessel crops of ``make_sim_crops``,
+  so GAA can see exactly the images the token trainer sees;
+* ``--train_only`` with ``--split_json`` keeps the training split only;
+* ``--attn_layer`` picks the class-token row that is supervised (-1 is the
+  last layer, -2 the layer-23 class token of ViT-L/14);
+* ``--dr`` applies photometric domain randomization (``dr_aug``);
+* ``--vision_model`` accepts any backbone in ``backbone``.  For SigLIP the
+  supervised map is the attention-pooling head's probe attention.
+
 Memory note: gradients must flow through the attention probabilities, so
 ``output_attentions=True`` retains the attention tensor of every layer for the
 backward pass.  For CLIP-ViT-L/14-336 that is ``24 x B x 16 x 577^2`` floats,
@@ -51,10 +62,11 @@ from PIL import Image
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data import Dataset, DataLoader, DistributedSampler
 
+from additional import backbone as bb
 from additional.config import assert_policy_or_die
+from additional.dr_aug import randomize
 from gaa.geometric_loss import compute_geometric_mask
-from additional.box_geometry import transform_boxes
-from gaa.geo_losses import VARIANTS, extract_cls_attn, geo_loss
+from gaa.geo_losses import VARIANTS, geo_loss
 
 DTYPES = {"float32": torch.float32, "float16": torch.float16,
           "bfloat16": torch.bfloat16}
@@ -72,15 +84,34 @@ class GeoTrainSet(Dataset):
 
     def __init__(self, data_path: str, image_dir: str, processor,
                  box_geometry: str = "raw", image_w: int = 1920,
-                 image_h: int = 1080):
+                 image_h: int = 1080, info=None, crops_json: str | None = None,
+                 crop_dir: str | None = None, split_json: str | None = None,
+                 dr: bool = False):
         with open(data_path) as f:
             raw = json.load(f)
+        split = json.load(open(split_json))["split"] if split_json else None
+        self.stats = Counter()
+        if split is not None:
+            n0 = len(raw)
+            raw = [s for s in raw if split[s["id"]] == "train"]
+            self.stats["frame_val_excluded"] = n0 - len(raw)
         self.samples = [s for s in raw if s.get("bboxes")]
         self.n_dropped_no_box = len(raw) - len(self.samples)
+        if crops_json:
+            for c in json.load(open(crops_json)):
+                if c["kind"] == "neg" or not c.get("bboxes"):
+                    continue
+                if split is not None and c["split"] != "train":
+                    self.stats["crop_val_excluded"] += 1
+                    continue
+                self.samples.append({"id": c["id"], "image": os.path.join(crop_dir, c["image"]),
+                                     "bboxes": c["bboxes"], "width": c["width"],
+                                     "height": c["height"], "kind": c["kind"]})
         self.image_dir = image_dir
         self.processor = processor
         self.box_geometry = box_geometry
         self.image_w, self.image_h = image_w, image_h
+        self.info, self.dr = info, dr
 
     def __len__(self) -> int:
         return len(self.samples)
@@ -94,15 +125,35 @@ class GeoTrainSet(Dataset):
             image = Image.open(path).convert("RGB")
         except (OSError, ValueError):
             return None
+        if self.dr:
+            image = randomize(image)
         pv = self.processor(images=image, return_tensors="pt").pixel_values[0]
         boxes = s["bboxes"]
         if self.box_geometry == "cropped":
             # Lay the target on the pixels the encoder receives.  Boxes that
             # the centre crop removes are dropped; if none survives, the mask
             # comes out empty and the loop below counts it as empty_mask.
-            boxes = transform_boxes(boxes, s.get("width", self.image_w),
-                                    s.get("height", self.image_h))
+            boxes = bb.map_boxes(self.info, boxes, s.get("width", self.image_w),
+                                 s.get("height", self.image_h))
         return pv, boxes
+
+
+class GeoNet(torch.nn.Module):
+    """Encoder plus the pooled attention map GAA supervises.
+
+    The map is computed inside ``forward`` so that DDP's unused-parameter
+    search starts from the tensor the loss actually uses.  For SigLIP the
+    pooling head is applied a second time with attention weights returned,
+    and the head's MLP never enters the loss.
+    """
+
+    def __init__(self, encoder, info, attn_layer: int):
+        super().__init__()
+        self.encoder, self.info, self.attn_layer = encoder, info, attn_layer
+
+    def forward(self, pv):
+        out = self.encoder(pixel_values=pv, output_attentions=self.info.kind == "clip")
+        return bb.pooled_attention(self.info, self.encoder, out, self.attn_layer)
 
 
 def collate(batch):
@@ -154,6 +205,12 @@ def parse_args():
     p.add_argument("--grad_clip", type=float, default=1.0)
     p.add_argument("--dtype", default="float32", choices=sorted(DTYPES))
     p.add_argument("--seed", type=int, default=0)
+    p.add_argument("--crops_json", default=None)
+    p.add_argument("--crop_dir", default=None)
+    p.add_argument("--split_json", default=None)
+    p.add_argument("--train_only", action="store_true")
+    p.add_argument("--attn_layer", type=int, default=-1)
+    p.add_argument("--dr", action="store_true")
     p.add_argument("--max_steps", type=int, default=-1,
                    help="stop after N optimiser steps (-1 = full schedule)")
     p.add_argument("--log_every", type=int, default=20)
@@ -178,20 +235,21 @@ def main():
     seed_everything(args.seed, rank)
     assert_policy_or_die()
 
-    from transformers import CLIPVisionModel, CLIPImageProcessor, CLIPVisionConfig
-
-    cfg = CLIPVisionConfig.from_pretrained(args.vision_model)
-    feature_size = cfg.image_size // cfg.patch_size
-
-    encoder = CLIPVisionModel.from_pretrained(
-        args.vision_model, torch_dtype=dtype, attn_implementation="eager"
-    ).to(device)
+    if args.train_only and not args.split_json:
+        raise SystemExit("--train_only needs --split_json")
+    kind = bb.kind_of(args.vision_model)
+    encoder, processor, info = bb.load(args.vision_model, dtype, eager=kind == "clip")
+    feature_size = info.g
+    encoder = encoder.to(device)
     encoder.train()
-    processor = CLIPImageProcessor.from_pretrained(args.vision_model)
 
     dataset = GeoTrainSet(args.data_path, args.image_dir, processor,
                           box_geometry=args.box_geometry,
-                          image_w=args.image_w, image_h=args.image_h)
+                          image_w=args.image_w, image_h=args.image_h, info=info,
+                          crops_json=args.crops_json, crop_dir=args.crop_dir,
+                          split_json=args.split_json if args.train_only else None,
+                          dr=args.dr)
+    net = GeoNet(encoder, info, args.attn_layer).to(device)
     sampler = (DistributedSampler(dataset, num_replicas=world, rank=rank,
                                   shuffle=True, seed=args.seed)
                if distributed else None)
@@ -207,8 +265,8 @@ def main():
     # single-GPU training in the submitted work left those weights at their
     # pretrained values for the same reason, so enabling this keeps the two
     # setups numerically comparable rather than changing what is trained.
-    model = (DDP(encoder, device_ids=[local_rank], find_unused_parameters=True)
-             if distributed else encoder)
+    model = (DDP(net, device_ids=[local_rank], find_unused_parameters=True)
+             if distributed else net)
     params = [p for p in model.parameters() if p.requires_grad]
     opt = torch.optim.AdamW(params, lr=args.lr, weight_decay=args.weight_decay)
 
@@ -266,8 +324,7 @@ def main():
                 fg_patch_sum += float(fg_per_sample[keep].sum().item())
                 fg_patch_n += n_valid
 
-            out = model(pixel_values=pv, output_attentions=True)
-            cls_attn = extract_cls_attn(out.attentions[-1], feature_size)
+            cls_attn = model(pv)
 
             # Empty-mask samples must not contribute, but a rank must never
             # skip the step.  An empty mask normalises to an all-zero target
@@ -388,7 +445,7 @@ def main():
         core = model.module if distributed else model
         core.eval()
         ckpt = os.path.join(args.output_dir, "vision_encoder.bin")
-        torch.save(core.state_dict(), ckpt)
+        torch.save(core.encoder.state_dict(), ckpt)
 
         meta = {
             "checkpoint": ckpt,
@@ -409,6 +466,9 @@ def main():
             "dtype": args.dtype,
             "seed": args.seed,
             "n_samples": len(dataset),
+            "crops_json": args.crops_json, "train_only": args.train_only,
+            "attn_layer": args.attn_layer, "dr": args.dr,
+            "data_stats": dict(dataset.stats),
             "n_dropped_no_box": dataset.n_dropped_no_box,
             "total_steps": step,
             "wall_seconds": round(time.time() - t0, 1),

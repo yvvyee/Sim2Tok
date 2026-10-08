@@ -27,7 +27,15 @@ vessels the centre crop removes) with all-zero ``occ`` and ``center`` targets.
 Without it every training image shows at least one vessel.
 
 All images are simulator images from AIVN-SDS 10k: the 10,000 frames and the
-sub-crops ``make_sim_crops`` cut from them.  The total number of optimiser
+sub-crops ``make_sim_crops`` cut from them.  ``--train_only`` with
+``--split_json`` keeps only frames and crops of the training split, so the
+simulator validation split stays unseen by the encoder.
+
+``--target image`` is the image-level control: the same encoder layer and
+data, but the head reads the mean of the patch tokens and predicts vessel
+presence and the number of visible vessels, so no per-token target exists.
+``--dr`` applies photometric domain randomization (``dr_aug``) to every
+training image.  ``--vision_model`` accepts any backbone in ``backbone``.  The total number of optimiser
 steps is fixed by ``--total_steps`` so that conditions with more images do not
 also get more updates.
 
@@ -58,8 +66,9 @@ from PIL import Image
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data import DataLoader, Dataset, DistributedSampler
 
-from additional.box_geometry import transform_boxes
+from additional import backbone as bb
 from additional.config import assert_policy_or_die
+from additional.dr_aug import randomize
 
 STATE_KEYS = ["dist_nm", "rel_course", "cpa", "tcpa"]
 IGNORE = -100
@@ -155,9 +164,14 @@ def shuffle_state(nav: dict, seed: int) -> dict:
 def build_items(args, nav: dict) -> tuple[list[dict], Counter]:
     """One item per training image: path, size, vessels in full-image coords."""
     frames = json.load(open(args.frames_json))
+    split = (json.load(open(args.split_json))["split"]
+             if args.train_only else None)
     stats = Counter()
     items = []
     for r in frames:
+        if split is not None and split[r["id"]] != "train":
+            stats["frame_val_excluded"] += 1
+            continue
         vs = nav.get(r["id"])
         if vs is None:
             stats["frame_no_nav"] += 1
@@ -168,6 +182,9 @@ def build_items(args, nav: dict) -> tuple[list[dict], Counter]:
     navbox = {k: vs for k, vs in nav.items()}
     for c in json.load(open(args.crops_json)):
         if c["kind"] == "neg" and not args.absent:
+            continue
+        if split is not None and c["split"] != "train":
+            stats["crop_val_excluded"] += 1
             continue
         # make_sim_crops cuts the window rounded to whole pixels and normalises
         # the boxes by the saved crop size, so invert with the same numbers.
@@ -195,9 +212,10 @@ def build_items(args, nav: dict) -> tuple[list[dict], Counter]:
 
 
 class TokenSet(Dataset):
-    def __init__(self, items, processor, bins, g, absent):
-        self.items, self.processor, self.bins, self.g = items, processor, bins, g
-        self.absent = absent
+    def __init__(self, items, processor, bins, info, absent, dr=False):
+        self.items, self.processor, self.bins, self.info = items, processor, bins, info
+        self.g = info.g
+        self.absent, self.dr = absent, dr
 
     def __len__(self):
         return len(self.items)
@@ -206,7 +224,7 @@ class TokenSet(Dataset):
         """Vessels mapped into the encoder's centre crop, box in crop coords."""
         out = []
         for v in it["vessels"]:
-            t = transform_boxes([v["box"]], it["w"], it["h"])
+            t = bb.map_boxes(self.info, [v["box"]], it["w"], it["h"])
             if t:
                 out.append(dict(v, box=t[0]))
         return out
@@ -217,9 +235,12 @@ class TokenSet(Dataset):
             img = Image.open(it["path"]).convert("RGB")
         except (OSError, ValueError):
             return None
+        if self.dr:
+            img = randomize(img)
         pv = self.processor(images=img, return_tensors="pt").pixel_values[0]
-        occ, center, state, weight = token_targets(self.visible(it), self.g, self.bins)
-        return pv, occ, center, state, weight
+        vis = self.visible(it)
+        occ, center, state, weight = token_targets(vis, self.g, self.bins)
+        return pv, occ, center, state, weight, torch.tensor(float(len(vis)))
 
 
 def collate(batch):
@@ -247,14 +268,28 @@ class ProbeHead(nn.Module):
                 [s(h) for s in self.state])
 
 
-class Wrapped(nn.Module):
-    def __init__(self, encoder, head, layer):
+class ImageHead(nn.Module):
+    """Image-level control: presence and count from the mean patch token."""
+
+    def __init__(self, dim, hidden=512):
         super().__init__()
-        self.encoder, self.head, self.layer = encoder, head, layer
+        self.trunk = nn.Sequential(nn.LayerNorm(dim), nn.Linear(dim, hidden), nn.GELU())
+        self.presence = nn.Linear(hidden, 1)
+        self.count = nn.Linear(hidden, 1)
+
+    def forward(self, tok):
+        h = self.trunk(tok.mean(dim=1))
+        return self.presence(h).squeeze(-1), self.count(h).squeeze(-1)
+
+
+class Wrapped(nn.Module):
+    def __init__(self, encoder, head, layer, info):
+        super().__init__()
+        self.encoder, self.head, self.layer, self.info = encoder, head, layer, info
 
     def forward(self, pv):
         hs = self.encoder(pixel_values=pv, output_hidden_states=True).hidden_states
-        tok = hs[self.layer][:, 1:, :]           # drop CLS, as the VLM does
+        tok = bb.patch_tokens(self.info, hs, self.layer)   # tokens the VLM reads
         return self.head(tok.float())
 
 
@@ -273,7 +308,13 @@ def parse_args():
     p.add_argument("--absent", action="store_true")
     p.add_argument("--shuffle_state", action="store_true",
                    help="control: permute navigation state across vessels")
-    p.add_argument("--layer", type=int, default=-2)
+    p.add_argument("--layer", type=int, default=None,
+                   help="hidden_states index; default is the layer the VLM reads")
+    p.add_argument("--split_json", default=None)
+    p.add_argument("--train_only", action="store_true",
+                   help="drop frames and crops of the validation split")
+    p.add_argument("--target", default="token", choices=["token", "image"])
+    p.add_argument("--dr", action="store_true", help="photometric domain randomization")
     p.add_argument("--total_steps", type=int, default=3000)
     p.add_argument("--per_device_batch", type=int, default=8)
     p.add_argument("--lr", type=float, default=1e-5)
@@ -309,10 +350,15 @@ def main():
     torch.manual_seed(args.seed); torch.cuda.manual_seed_all(args.seed)
     assert_policy_or_die()
 
-    from transformers import CLIPImageProcessor, CLIPVisionModel
-    encoder = CLIPVisionModel.from_pretrained(args.vision_model, torch_dtype=torch.float32).to(device)
-    processor = CLIPImageProcessor.from_pretrained(args.vision_model)
-    g = encoder.config.image_size // encoder.config.patch_size
+    if args.train_only and not args.split_json:
+        raise SystemExit("--train_only needs --split_json")
+    if args.target == "image" and use_state:
+        raise SystemExit("--target image takes no state channel")
+    encoder, processor, info = bb.load(args.vision_model, torch.float32)
+    encoder = encoder.to(device)
+    g = info.g
+    if args.layer is None:
+        args.layer = info.vlm_layer
 
     nav = json.load(open(args.nav_json))
     bins = make_bins(nav)               # bins from the true values either way
@@ -321,16 +367,18 @@ def main():
     items, build_stats = build_items(args, nav)
     if not args.absent:
         # Every image must show a vessel inside the centre crop.
-        ds_probe = TokenSet(items, processor, bins, g, args.absent)
+        ds_probe = TokenSet(items, processor, bins, info, args.absent)
         items = [it for it in items if ds_probe.visible(it)]
-    dataset = TokenSet(items, processor, bins, g, args.absent)
+    dataset = TokenSet(items, processor, bins, info, args.absent, dr=args.dr)
     kinds = Counter(it["kind"] for it in items)
     n_empty = sum(1 for it in items if not dataset.visible(it))
 
     torch.manual_seed(args.seed)            # same head init on every rank
-    head = ProbeHead(encoder.config.hidden_size,
-                     [n_classes(k, bins) for k in STATE_KEYS]).to(device)
-    model = Wrapped(encoder, head, args.layer).to(device)
+    if args.target == "image":
+        head = ImageHead(info.hidden).to(device)
+    else:
+        head = ProbeHead(info.hidden, [n_classes(k, bins) for k in STATE_KEYS]).to(device)
+    model = Wrapped(encoder, head, args.layer, info).to(device)
     model.train()
     # Layers above ``--layer`` and post_layernorm get no gradient.
     if distributed:
@@ -365,7 +413,27 @@ def main():
         for batch in loader:
             if batch is None:
                 continue
-            pv, occ_t, cen_t, st_t, w_t = [x.to(device, non_blocking=True) for x in batch]
+            pv, occ_t, cen_t, st_t, w_t, n_t = [x.to(device, non_blocking=True) for x in batch]
+            if args.target == "image":
+                # Presence BCE plus a count regression on log(1 + n).
+                pres_p, cnt_p = model(pv)
+                l_occ = F.binary_cross_entropy_with_logits(pres_p, (n_t > 0).float())
+                l_cen = F.smooth_l1_loss(cnt_p, torch.log1p(n_t))
+                loss = l_occ + l_cen
+                opt.zero_grad(set_to_none=True)
+                loss.backward()
+                torch.nn.utils.clip_grad_norm_(core.parameters(), args.grad_clip)
+                opt.step(); sched.step(); step += 1
+                run.update({"occ": l_occ.item(), "cen": l_cen.item(), "st": 0.0, "n": 1})
+                if rank == 0 and step % args.log_every == 0:
+                    n = run["n"]
+                    rec = {"step": step, "presence": run["occ"] / n, "count": run["cen"] / n,
+                           "sec": round(time.time() - t0)}
+                    history.append(rec); run = Counter()
+                    print(f"  {rec}", flush=True)
+                if step >= args.total_steps:
+                    break
+                continue
             occ_p, cen_p, st_p = model(pv)
             l_occ = F.binary_cross_entropy_with_logits(occ_p, occ_t)
             l_cen = F.binary_cross_entropy_with_logits(cen_p, cen_t, pos_weight=pw)
@@ -406,6 +474,7 @@ def main():
         meta.update({"n_images": len(dataset), "kinds": dict(kinds), "n_vessel_free": n_empty,
                      "bins": bins, "build_stats": dict(build_stats), "epochs_seen": epoch,
                      "world": world, "wall_seconds": round(time.time() - t0, 1),
+                     "grid": g, "backbone_kind": info.kind,
                      "history": history, "state_keys": STATE_KEYS})
         json.dump(meta, open(os.path.join(args.output_dir, "train_meta.json"), "w"), indent=2)
         print(f"[tok] saved after {step} steps, {meta['wall_seconds']} s", flush=True)

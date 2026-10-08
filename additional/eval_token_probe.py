@@ -47,7 +47,7 @@ from PIL import Image
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data import DataLoader, Dataset, DistributedSampler
 
-from additional.box_geometry import transform_boxes
+from additional import backbone as bb
 from additional.config import assert_policy_or_die
 from additional.train_token_ddp import ProbeHead, token_targets
 
@@ -86,8 +86,8 @@ def real_items(name, json_path, image_dir):
 
 
 class ProbeSet(Dataset):
-    def __init__(self, items, processor, g):
-        self.items, self.processor, self.g = items, processor, g
+    def __init__(self, items, processor, info):
+        self.items, self.processor, self.info, self.g = items, processor, info, info.g
 
     def __len__(self):
         return len(self.items)
@@ -99,7 +99,7 @@ class ProbeSet(Dataset):
         except (OSError, ValueError):
             return None
         pv = self.processor(images=img, return_tensors="pt").pixel_values[0]
-        vis = [{"box": b} for b in transform_boxes(it["boxes"], it["w"], it["h"])]
+        vis = [{"box": b} for b in bb.map_boxes(self.info, it["boxes"], it["w"], it["h"])]
         occ, center, _, _ = token_targets(vis, self.g, {})
         return pv, occ, center, i, len(vis)
 
@@ -132,7 +132,8 @@ def main():
     p.add_argument("--real", action="append", default=[],
                    help="name=json_path:image_dir")
     p.add_argument("--out_dir", required=True)
-    p.add_argument("--layer", type=int, default=-2)
+    p.add_argument("--layer", type=int, default=None,
+                   help="hidden_states index; default is the layer the VLM reads")
     p.add_argument("--head_steps", type=int, default=1500)
     p.add_argument("--head_lr", type=float, default=1e-3)
     p.add_argument("--per_device_batch", type=int, default=16)
@@ -153,9 +154,10 @@ def main():
     random.seed(args.seed + rank); np.random.seed(args.seed + rank)
     assert_policy_or_die()
 
-    from transformers import CLIPImageProcessor, CLIPVisionModel
     label, path = args.encoder.split("=", 1)
-    encoder = CLIPVisionModel.from_pretrained(args.vision_model, torch_dtype=torch.float32)
+    encoder, processor, info = bb.load(args.vision_model, torch.float32)
+    if args.layer is None:
+        args.layer = info.vlm_layer
     if path != "none":
         sd = torch.load(path, map_location="cpu")
         missing, unexpected = encoder.load_state_dict(sd, strict=False)
@@ -164,21 +166,20 @@ def main():
         if missing:
             raise SystemExit(f"encoder weights missing: {missing[:5]}")
     encoder = encoder.to(device).eval().requires_grad_(False)
-    processor = CLIPImageProcessor.from_pretrained(args.vision_model)
-    g = encoder.config.image_size // encoder.config.patch_size
+    g = info.g
 
     def tokens(pv):
         with torch.no_grad(), torch.autocast("cuda", dtype=torch.bfloat16):
             hs = encoder(pixel_values=pv, output_hidden_states=True).hidden_states
-        return hs[args.layer][:, 1:, :].float()
+        return bb.patch_tokens(info, hs, args.layer).float()
 
     # ── head on the simulator training split ──
     torch.manual_seed(args.seed)
-    head = ProbeHead(encoder.config.hidden_size, []).to(device)
+    head = ProbeHead(info.hidden, []).to(device)
     head_ddp = DDP(head, device_ids=[local_rank]) if distributed else head
     opt = torch.optim.AdamW(head.parameters(), lr=args.head_lr, weight_decay=0.01)
     sched = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=args.head_steps)
-    train = ProbeSet(sim_items(args, "train"), processor, g)
+    train = ProbeSet(sim_items(args, "train"), processor, info)
     sampler = DistributedSampler(train, world, rank, shuffle=True, seed=args.seed) if distributed else None
     loader = DataLoader(train, batch_size=args.per_device_batch, sampler=sampler,
                         shuffle=sampler is None, num_workers=args.num_workers,
@@ -216,7 +217,7 @@ def main():
         jp, idir = rest.rsplit(":", 1)
         sets.append((name, real_items(name, jp, idir)))
     for name, items in sets:
-        ds = ProbeSet(items, processor, g)
+        ds = ProbeSet(items, processor, info)
         idx = list(range(rank, len(ds), world))
         sub = torch.utils.data.Subset(ds, idx)
         dl = DataLoader(sub, batch_size=32, shuffle=False, num_workers=args.num_workers,
@@ -260,7 +261,8 @@ def main():
         json.dump({"encoder": args.encoder, "head_steps": args.head_steps,
                    "head_lr": args.head_lr, "seed": args.seed, "layer": args.layer,
                    "n_train": len(train), "thresholds": THRESH, "nbin": NBIN,
-                   "sets": [s for s, _ in sets], "wall_seconds": round(time.time() - t0, 1)},
+                   "sets": [s for s, _ in sets], "vision_model": args.vision_model,
+                   "grid": g, "world": world, "per_device_batch": args.per_device_batch, "wall_seconds": round(time.time() - t0, 1)},
                   open(os.path.join(args.out_dir, "meta.json"), "w"), indent=2)
     if distributed:
         dist.barrier(); dist.destroy_process_group()
