@@ -3,12 +3,15 @@
 # review).  Simulator data only: every encoder is trained on the AIVN-SDS
 # training split (--train_only), so the AIVN validation split is unseen by the
 # encoders as well as the probe heads.  Real datasets are used for evaluation
-# only.  GPUs 2,3,4 through torchrun (3 ranks), one job at a time.
+# only.  GPUs 2,3,4,5 through torchrun (4 ranks), one job at a time.  The
+# first encoder (rev_tok seed 0) ran on GPUs 2,3,4 with 3 ranks; the global
+# batch sizes below are the same for 3 and 4 ranks, so only the sharding of
+# the data order differs.
 #
-# Batch sizes keep the sample counts of the four-GPU runs:
-#   token / matched GAA  per-device 8 x 3 = 24, 4,000 steps  (96,000 samples)
-#   probe head           per-device 16 x 3 = 48, 2,000 steps (96,000 samples)
-#   detection probe      per-device 16 x 3 = 48, 4,000 steps (192,000 samples)
+#   token / GAA          global batch 24, 4,000 steps        (96,000 samples)
+#   probe head           global batch 48, 2,000 steps        (96,000 samples)
+#   detection probe      global batch 48, 4,000 steps        (192,000 samples)
+#   VLM                  global batch 48 (per-device x accumulation 4)
 #
 # Blocks, in order (each block runs all seeds before the next starts):
 #   A  core: token occupancy, GAA as before (frames, 5 epochs), GAA matched to
@@ -29,8 +32,9 @@ REAL=/mnt/ssd1/yvvyee/realeval
 LLM=/home/yvvyee/data/Models/Llama-3.1-8B-Instruct
 CC3M=$ROOT/weights/tango2_cc3m/clip_llama31_proj_lora
 CUE=$ROOT/cue_sets
-export CUDA_VISIBLE_DEVICES=2,3,4
-NP=3
+export CUDA_VISIBLE_DEVICES=2,3,4,5
+NP=4
+PD_ENC=$((24 / NP)); PD_PROBE=$((48 / NP)); PD_VLM=$((12 / NP))
 SEEDS=${SEEDS:-"0 1 2"}
 BLOCKS=${BLOCKS:-"A B C D E F G H I"}
 LOG="$ROOT/logs/rev_stage.log"
@@ -61,7 +65,7 @@ tok () {  # $1=name $2=seed $3=vision model, rest=flags
   say "train $name s$s"
   twice $BIN/torchrun --nproc_per_node $NP --master_port 29711 -m additional.train_token_ddp \
     "${SIMD[@]}" "${SPLIT[@]}" --nav_json "$ROOT/data/aivn_nav_state.json" \
-    --vision_model "$vm" --output_dir "$OUT" --total_steps 4000 --per_device_batch 8 \
+    --vision_model "$vm" --output_dir "$OUT" --total_steps 4000 --per_device_batch $PD_ENC \
     --seed "$s" "$@" >> "$LOG" 2>&1 || { say "TRAIN FAILED $name s$s"; return 1; }
 }
 
@@ -73,7 +77,7 @@ gaa () {  # $1=name $2=seed $3=vision model $4=data json, rest=flags
   twice $BIN/torchrun --nproc_per_node $NP --master_port 29712 -m additional.train_geo_ddp \
     --data_path "$data" --image_dir "$ROOT/aivn_correct/png" "${SPLIT[@]}" \
     --vision_model "$vm" --output_dir "$OUT" --variant inbox_ce --lam 1.0 --lr 1e-5 \
-    --weight_decay 0.01 --per_device_batch 8 --geo_tau 0.01 --box_geometry cropped \
+    --weight_decay 0.01 --per_device_batch $PD_ENC --geo_tau 0.01 --box_geometry cropped \
     --dtype float32 --seed "$s" "$@" >> "$LOG" 2>&1 || { say "TRAIN FAILED $name s$s"; return 1; }
 }
 MATCHED=(--crops_json "$ROOT/aivn_crops/crops.json" --crop_dir "$ROOT/aivn_crops"
@@ -88,7 +92,7 @@ probe () {  # $1=label $2=seed $3=vision model $4=encoder path or none
     --encoder "$1=$4" --vision_model "$3" --sim_frames_json "$ROOT/data/ok_aivn_10000.json" \
     --split_json "$ROOT/data/aivn_split.json" --crops_json "$ROOT/aivn_crops/crops.json" \
     --frame_dir "$ROOT/aivn_correct/png" --crop_dir "$ROOT/aivn_crops" \
-    "${REALS[@]}" "${CUES[@]}" --head_steps 2000 --per_device_batch 16 \
+    "${REALS[@]}" "${CUES[@]}" --head_steps 2000 --per_device_batch $PD_PROBE \
     --seed "$2" --out_dir "$OUT" >> "$LOG" 2>&1 || say "PROBE FAILED $1 s$2"
 }
 enc () { echo "$CK/$1_s$2/vision_encoder.bin"; }
@@ -132,10 +136,10 @@ block_E () {
   local Y=$ROOT/results/yolo_ref
   if [ ! -f "$Y/train/weights/best.pt" ]; then
     say "train YOLOv8s (sim only)"
-    $BIN/python -m additional.assert_gpu_policy --select-device 0,1,2 >> "$LOG" 2>&1 \
+    $BIN/python -m additional.assert_gpu_policy --select-device 0,1,2,3 >> "$LOG" 2>&1 \
       || { say "YOLO GPU POLICY CHECK FAILED"; return 1; }
     (cd "$ROOT" && $BIN/yolo detect train model="$ROOT/yolov8s.pt" data="$ROOT/yolo_sim/data.yaml" \
-      epochs=40 imgsz=1280 batch=48 device=0,1,2 workers=12 seed=0 \
+      epochs=40 imgsz=1280 batch=48 device=0,1,2,3 workers=12 seed=0 \
       project="$Y" name=train exist_ok=True val=True plots=False) >> "$LOG" 2>&1 \
       || { say "YOLO TRAIN FAILED"; return 1; }
   fi
@@ -161,7 +165,7 @@ train_vlm () {  # $1=name $2=seed $3=encoder path or empty
     --projector_path "$CC3M/projector.bin" --resume_lora_path "$CC3M" \
     $EXTRA \
     --data_path "$ROOT/data/vlm_sft_v2_train.json" --image_dir / \
-    --output_dir "$OUT" --num_epochs 1 --batch_size 4 --grad_accum 4 \
+    --output_dir "$OUT" --num_epochs 1 --batch_size $PD_VLM --grad_accum 4 \
     --learning_rate 2e-4 --warmup_ratio 0.03 --lr_scheduler cosine \
     --save_steps 100000 --save_total_limit 1 --seed "$2" --dtype bfloat16 \
     --no_tensorboard >> "$LOG" 2>&1 || { say "VLM TRAIN FAILED $1 s$2"; return 1; }
@@ -212,7 +216,7 @@ det () {  # $1=label $2=seed $3=encoder path or none
     --encoder "$1=$3" --sim_frames_json "$ROOT/data/ok_aivn_10000.json" \
     --split_json "$ROOT/data/aivn_split.json" --crops_json "$ROOT/aivn_crops/crops.json" \
     --frame_dir "$ROOT/aivn_correct/png" --crop_dir "$ROOT/aivn_crops" \
-    "${REALS[@]}" --head_steps 4000 --per_device_batch 16 \
+    "${REALS[@]}" --head_steps 4000 --per_device_batch $PD_PROBE \
     --seed "$2" --out_dir "$OUT" >> "$LOG" 2>&1 || say "DET FAILED $1 s$2"
 }
 attn () {  # $1=tag $2=label $3=encoder path $4=attn layer
