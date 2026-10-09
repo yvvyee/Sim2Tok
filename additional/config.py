@@ -79,13 +79,30 @@ def assert_policy_or_die(devices: tuple[int, ...] | None = None) -> None:
     if not torch.cuda.is_available():
         raise RuntimeError("no CUDA device is available")
 
-    out = subprocess.run(
-        ["nvidia-smi", "--query-gpu=index,uuid", "--format=csv,noheader"],
-        capture_output=True, text=True, check=True).stdout
     physical = {}
-    for line in out.strip().splitlines():
-        idx, uuid = (p.strip() for p in line.split(",", 1))
-        physical[int(idx)] = uuid.replace("GPU-", "")
+    try:
+        out = subprocess.run(
+            ["nvidia-smi", "--query-gpu=index,uuid", "--format=csv,noheader"],
+            capture_output=True, text=True, check=True).stdout
+        for line in out.strip().splitlines():
+            idx, uuid = (p.strip() for p in line.split(",", 1))
+            physical[int(idx)] = uuid.replace("GPU-", "")
+    except (OSError, subprocess.CalledProcessError):
+        # nvidia-smi fails after a user-space driver upgrade ("Driver/library
+        # version mismatch") while the loaded kernel module keeps CUDA
+        # working.  The kernel module lists every card under
+        # /proc/driver/nvidia/gpus/<PCI bus id>; nvidia-smi indices follow PCI
+        # bus order, so sorting the bus ids reproduces the same index -> UUID
+        # map (checked on 2026-10-10 against the earlier nvidia-smi output).
+        import glob
+        for idx, d in enumerate(sorted(glob.glob("/proc/driver/nvidia/gpus/*"))):
+            with open(os.path.join(d, "information")) as f:
+                for line in f:
+                    if line.startswith("GPU UUID"):
+                        physical[idx] = line.split()[-1].replace("GPU-", "")
+        if not physical:
+            raise RuntimeError("cannot map GPU indices to UUIDs: nvidia-smi failed "
+                               "and /proc/driver/nvidia/gpus is empty")
     reserved = {physical[i]: i for i in sorted(RESERVED_DEVICES) if i in physical}
     permitted = {physical[i] for i in allowed if i in physical}
 
