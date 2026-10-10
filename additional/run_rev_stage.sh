@@ -33,6 +33,15 @@ LLM=/home/yvvyee/data/Models/Llama-3.1-8B-Instruct
 CC3M=$ROOT/weights/tango2_cc3m/clip_llama31_proj_lora
 CUE=$ROOT/cue_sets
 export CUDA_VISIBLE_DEVICES=2,3,4,5
+# 2026-10-10: unattended-upgrade replaced the NVIDIA user-space libraries
+# (595.99.02) while the loaded kernel module stayed at 595.91.07, so NVML and
+# hence NCCL fail.  The matching 595.91.07 user-space libraries, extracted from
+# NVIDIA's runfile into the home directory, are put first on the library path
+# for these jobs only.  No system file is changed.
+NVLIB=$HOME/nvidia_595.91.07/lib
+if [ -d "$NVLIB" ] && ! grep -q "595.99" /proc/driver/nvidia/version; then
+  export LD_LIBRARY_PATH="$NVLIB${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+fi
 NP=4
 PD_ENC=$((24 / NP)); PD_PROBE=$((48 / NP)); PD_VLM=$((12 / NP))
 SEEDS=${SEEDS:-"0 1 2"}
