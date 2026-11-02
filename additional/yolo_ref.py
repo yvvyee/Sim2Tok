@@ -106,7 +106,7 @@ def evaluate(args):
     model = YOLO(args.weights)
     os.makedirs(args.out_dir, exist_ok=True)
 
-    sets = [("aivn_val", sim_records(args, "val"))]
+    sets = [] if args.skip_sim_val else [("aivn_val", sim_records(args, "val"))]
     for spec in args.real:
         name, rest = spec.split("=", 1)
         jp, idir = rest.rsplit(":", 1)
@@ -170,6 +170,8 @@ def main():
     p.add_argument("--out_dir")
     p.add_argument("--imgsz", type=int, default=1280)
     p.add_argument("--conf", type=float, default=0.001)
+    p.add_argument("--skip_sim_val", action="store_true",
+                   help="evaluate the --real sets only")
     args = p.parse_args()
     export(args) if args.mode == "export" else evaluate(args)
 

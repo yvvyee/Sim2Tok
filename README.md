@@ -1,181 +1,139 @@
-# GAA — Geometric Attention Alignment for Maritime VLMs
+# Sim2Tok
 
-**English** · [한국어](README.ko.md)
+English · [한국어](README.ko.md)
 
-Train-time **privileged-information attention alignment** for maritime
-Vision-Language Models. GAA adds an auxiliary loss that uses ground-truth
-vessel bounding boxes (available only during training) to steer the visual
-encoder's attention onto vessel geometry instead of sea/background texture,
-addressing the sim-to-real gap in maritime perception. The boxes are used
-**only during training** (LUPI paradigm); inference is a standard VLM with no
-extra cost.
+Code for the paper "Where Simulator Geometry Should Enter a Vision-Language Encoder: Token Supervision Narrows the Maritime Sim-to-Real Gap" by Young-Woon Lee, Changsik Cho and Byung-Gyu Kim, Maritime Computer Vision (MaCVi) Workshop at WACV 2027.
 
-This repository bundles the GAA implementation (`gaa/`) together with the
-minimal base VLM framework it depends on (`model/`, `data/dataset.py`,
-`train.py`) so it runs standalone.
+The paper asks where simulator vessel geometry should supervise the CLIP vision encoder of a LLaVA-style Vision-Language Model (VLM) when no real image is used for training, model selection or threshold tuning. Two supervisions are compared. Both use only the vessel boxes that the simulator provides.
 
----
+- Geometric Attention Alignment (GAA) aligns the layer-24 class-token attention with the vessel boxes. The VLM discards the class token, so this quantity does not reach the language model.
+- Token occupancy attaches a head to every layer-23 patch token, which is the input of the VLM projector, and predicts the fraction of the token's cell covered by vessels and whether a vessel center lies in it. The head is discarded after training, so the encoder keeps its interface and inference cost.
 
-## Highlights
+Every encoder is trained on the training split of the AIVN-SDS simulator dataset only. Five real datasets are used for evaluation only.
 
-- **Geometric attention loss with multiple variants** (`gaa/geo_losses.py`):
-  - `bg_l2` — original background-suppression L2 (baseline; see note below).
-  - `inbox_ce` — **recommended**: cross-entropy matching CLS attention to the
-    foreground (vessel-mask) distribution. Actively concentrates attention on
-    vessels rather than merely suppressing background.
-  - `inbox_mass`, `fg_bg_margin` — alternative formulations.
-- **Evaluation suite**: attention alignment (Attn-IoU), attention-grounded
-  detection, texture-bias decomposition (vessel/sea/sky), loss-variant study,
-  reasoning preservation.
-- **Multi-VLM benchmark** (`gaa/vlm_zoo.py`, `gaa/vlm_behavior_eval.py`): a
-  unified zero-shot maritime benchmark (vessel recall / hallucination / COLREG
-  situation accuracy) across 11 open VLM families.
-
-> **Note on `bg_l2`.** The original background-L2 loss is minimized by
-> *spreading* attention thinly rather than concentrating it on vessels, and in
-> our experiments does not improve (and can degrade) attention alignment. Use
-> `--geo_variant inbox_ce`. The variants are kept for ablation/reproducibility.
-
----
-
-## Repository structure
+## Repository layout
 
 ```
-gaa/
-  geometric_loss.py     # geometric mask (bbox -> patch grid) + original bg_l2 loss
-  geo_losses.py         # loss variants: bg_l2 / inbox_mass / inbox_ce / fg_bg_margin
-  gaa_dataset.py        # GAADataset / GAADataCollator (+ box-guided input crop)
-  gaa_trainer.py        # GAATrainer: L_total = L_SFT + lambda * L_geo
-  train_gaa.py          # training entry point (--geo_variant, --privileged_mode, ...)
-  evaluate_attn.py      # Attn-IoU / attn_in_box / bg_ratio
-  detect_eval.py        # attention-grounded detection: mAP@50 + FP/image
-  texture_bias_eval.py  # H0: vessel%/sea%/sky% attention decomposition (uses SMD HorizonGT)
-  loss_study.py         # vision-only loss-variant comparison (cross-domain via --test_data_path)
-  eval_reasoning.py     # reasoning-preservation check (swap encoder, keep LoRA)
-  attn_visualize.py     # per-sample attention heatmap panels
-  vlm_zoo.py            # unified multi-VLM registry + load()/generate()
-  vlm_behavior_eval.py  # zero-shot maritime behavioral benchmark
-  sds_reformat.py       # SDS (20260227 format) -> GAA chat.json
-  sds_old_to_gaa.py     # older SDS format (frame_*.png + input.csv) -> GAA json
-  smd_to_gaa.py         # Singapore Maritime Dataset (videos + ObjectGT) -> GAA json
-  compare_models.py     # qualitative baseline-vs-GAA generation
-  run_*.sh              # experiment drivers
-model/                  # base VLM framework (CLIP/SigLIP encoder, projector, LLaVA-style model)
-data/dataset.py         # LLaVADataset + collator (GAA dataset extends these)
-train.py                # base VLMTrainer (GAATrainer subclasses this)
-scripts/                # DeepSpeed configs + training shell scripts + SDS prep
-requirements.txt
+additional/            pipeline of the paper (training, probes, evaluation, data preparation)
+  run_rev_stage.sh     single entry point for all experiments of the paper (blocks A to I)
+  tables/              scripts that turn saved outputs into the tables and figures of the paper
+gaa/                   GAA loss (geo_losses.py, geometric_loss.py) and earlier GAA experiments
+model/, data/, train.py  LLaVA-style VLM (CLIP encoder, projector, Llama-3.1-8B with LoRA)
+scripts/               DeepSpeed configurations and earlier training scripts
 ```
 
----
+`gaa/README.md` documents the earlier GAA framework. The scripts `additional/run_token_stage.sh`, `run_det_stage.sh`, `run_det_reeval.sh` and `run_verify_*.sh` belong to the protocol before the revision (3,000 steps, no train-only split) and do not produce the numbers of the paper.
 
-## Installation
+## Environment
+
+The experiments ran on Ubuntu 24.04.5 LTS with four NVIDIA A100-PCIE 40 GB GPUs per job, launched with `torchrun` and distributed data parallelism. The SMD re-evaluation ran on a second server with two NVIDIA A100 80 GB PCIe GPUs and the same software.
+
+- Python 3.11.15
+- PyTorch 2.10.0 built for CUDA 12.8 with cuDNN 9.10.2, torchvision 0.25.0
+- Transformers 5.3.0, PEFT 0.18.1, Accelerate 1.13.0, NumPy 2.4.3 and the other pins in `requirements.txt`
+- Some scripts also import packages that `requirements.txt` does not list. These are `ultralytics` 8.4.142 (YOLOv8s reference), `opencv-python` (`make_cue_sets.py`), `scipy`, `matplotlib` and `tensorboard`.
 
 ```bash
-conda create -n gaa python=3.11 -y && conda activate gaa
-# install a CUDA-matched PyTorch first (do NOT install torch via requirements.txt):
-conda install pytorch torchvision torchaudio pytorch-cuda=12.8 -c pytorch -c nvidia -y
+conda create -n sim2tok python=3.11 -y && conda activate sim2tok
+conda install pytorch torchvision pytorch-cuda=12.8 -c pytorch -c nvidia -y
 pip install -r requirements.txt
-# optional, for 4-bit multi-VLM eval:
-pip install bitsandbytes
+pip install ultralytics==8.4.142 opencv-python scipy matplotlib tensorboard
 ```
 
----
+Paths, the conda environment and the GPU set are written into `additional/run_rev_stage.sh` (`ROOT`, `BIN`, `REAL`, `LLM`, `CC3M`, `CUDA_VISIBLE_DEVICES`) and `additional/config.py`. `config.HOST_POLICY` lists the GPUs allowed on each host (2, 3, 4 and 5 on `tg-a40g`, 0 and 1 on `tg-a80g`), and `config.assert_policy_or_die` stops a run on any other GPU. Edit these values before running on another machine.
 
-## Data preparation
+## Data
 
-GAA training needs image–text pairs with **normalized `[x1,y1,x2,y2]` vessel
-boxes** (`bboxes` field). Converters produce this from raw sources:
+Training data
+
+- AIVN-SDS, simulated ship-encounter images rendered with a Unity3D simulator, is available at https://huggingface.co/datasets/ETRI-TANGO/AIVN-SDS. The experiments use 10,000 frames listed in `data/ok_aivn_10000.json`. This list is not generated by a script in this repository.
+
+Real evaluation data, downloaded from their original sources
+
+| Dataset | Classes counted as vessels | Converter |
+|---|---|---|
+| Singapore Maritime Dataset (SMD), VIS_Onshore and NIR | ObjectGT classes 1, 3, 4, 5, 6 and 7 (Ferry, Vessel/ship, Speed boat, Boat, Kayak, Sail boat). Buoys, birds or planes and "Other" are kept as `other_boxes` and are not vessels | `additional/smd_full_to_gaa.py` |
+| Maritime Collision Avoidance Dataset (MCAD), visible and thermal | power-driven vessel, sailboat | `additional/real_eval_to_gaa.py` |
+| Lakes, Rivers and Seas (LaRS), train and validation | Boat/ship, Row boats | `additional/real_eval_to_gaa.py` |
+| SeaDronesSee ODv2, train and validation | boat, jetski | `additional/real_eval_to_gaa.py` |
+
+The converters also write the bootstrap resampling unit of each image. These are the SMD video, the LaRS sequence, the SeaDronesSee source video and the MCAD image itself.
+
+Preparation steps, run once in this order
+
+1. `additional/aivn_to_gaa.py` converts AIVN-SDS frames, descriptions and advice to JSON.
+2. `additional/make_sim_crops.py` writes the vessel and vessel-free crops and the 90/10 split by frame (25,529 training and 2,842 validation images).
+3. `additional/build_nav_state.py` writes the navigation-state targets that `train_token_ddp.py` loads.
+4. `additional/make_shuffled_boxes.py` writes the boxes permuted across images for the permuted-box control.
+5. `additional/real_eval_to_gaa.py` and `additional/smd_full_to_gaa.py` write the real evaluation JSON files.
+6. `additional/make_cue_sets.py` writes the texture-suppressed and block-permuted copies of the simulator validation images.
+7. `additional/build_vlm_sft_v2.py` writes the simulator-only instruction set for the VLM study.
+8. `python -m additional.yolo_ref export` writes the YOLO dataset for the detector reference.
+
+## Training and evaluation
 
 ```bash
-# SDS (current format): episode dirs with input_image.png + input_data.csv + advice text
-python gaa/sds_reformat.py --dataset_root /path/to/SDS/20260227 --output data/sds_gaa_en.json --lang en
-
-# Older SDS format (dataset*/frame_N.png + input.csv)
-python gaa/sds_old_to_gaa.py --dataset_root /path/to/SDS/20250922 --out_json data/_old_20250922.json
-
-# Singapore Maritime Dataset (real target): videos + ObjectGT(.mat) -> frames + boxes
-python gaa/smd_to_gaa.py --smd_root /path/to/SMD --split VIS_Onshore --frames_per_video 8 \
-    --out_json data/smd_onshore.json --out_images /path/to/smd_frames
+BLOCKS="A B C D E F G H I" SEEDS="0 1 2" bash additional/run_rev_stage.sh
 ```
 
-JSON entry: `{"id", "image", "conversations"?, "bboxes": [[x1,y1,x2,y2], ...]}`
-(normalized coords). Boxes are train-only privileged info.
+Each block runs all seeds before the next block starts.
 
----
+| Block | Content |
+|---|---|
+| A | token occupancy, GAA as originally proposed, GAA matched to token occupancy in images and steps, and frozen-encoder probes of these encoders and of the untouched CLIP encoder |
+| B | GAA on the layer-23 class-token attention |
+| C | domain randomization for token occupancy and matched GAA, and the image-level control |
+| D | CLIP ViT-B/16 at 224 pixels |
+| E | YOLOv8s reference detector trained on simulator images |
+| F | VLMs on the untouched, matched GAA and token-occupancy encoders |
+| G | SigLIP so400m/14 at 384 pixels |
+| H | detection probes, attention overlap and the permuted-box GAA control |
+| I | navigation-state and absence targets |
 
-## Training
+Main settings
 
-```bash
-python gaa/train_gaa.py \
-    --vision_model openai/clip-vit-large-patch14-336 \
-    --llm_model /path/to/Llama-3.1-8B-Instruct \
-    --projector_path /path/to/projector.bin \
-    --resume_lora_path /path/to/baseline_lora \
-    --data_path data/sds_gaa_en.json \
-    --image_dir /path/to/images \
-    --output_dir checkpoints/gaa_inbox_ce \
-    --geo_variant inbox_ce --geo_loss_weight 0.5 --geo_tau 0.5
+| Component | Setting | Code |
+|---|---|---|
+| Token occupancy | layer-23 tokens, 4,000 steps, global batch 24, AdamW with cosine schedule, encoder lr 1e-5, head lr 1e-3, weight decay 0.01, center loss positive weight 50, gradient clipping 1.0 | `train_token_ddp.py` |
+| GAA | `inbox_ce` loss on head-averaged layer-24 CLS attention, coverage threshold 0.01, lr 1e-5. Original setting is 5 epochs on 9,000 frames (1,875 steps). Matched setting is frames and vessel crops for 4,000 steps | `train_geo_ddp.py`, `gaa/geo_losses.py` |
+| Frozen-encoder probe | per-token head, 2,000 steps, global batch 48, head lr 1e-3, trained on the 25,529 simulator training images, count threshold selected on simulator validation | `eval_token_probe.py`, `probe_compare.py` |
+| Attention overlap | top-k overlap of head-averaged layer-24 CLS attention with cells covered by more than half | `eval_attn_mp.py` |
+
+## SMD re-evaluation with vessel classes only
+
+The first SMD conversion counted every ObjectGT box as a vessel. The paper reports SMD with vessel classes only. No model was retrained for this. `additional/run_smd_reeval.sh` converts SMD again, checks that the old labels reproduce a saved SMD output, and evaluates every saved encoder with its saved probe, detection or YOLO head on the new labels (`--init_head`, `--eval_only`, `--skip_sim_val`). `additional/yesno_rescore.py` regrades the saved VLM answers against the new labels, because neither the image nor the question depends on the labels. With the vessel classes, the SMD center crops contain 122,917 vessels and 124 crops contain none.
+
+## From outputs to the paper
+
+The scripts in `additional/tables/` read the saved outputs under `$GAA_ROOT/results`, where the SMD outputs are those of `run_smd_reeval.sh`. `GAA_ROOT` defaults to the directory used for the paper, `/mnt/ssd1/yvvyee/gaa_additional`. Run them from the repository root, for example `python -m additional.tables.pooled_boot main`.
+
+| Result in the paper | Scripts |
+|---|---|
+| Table 1, dataset statistics | summary files written by `real_eval_to_gaa.py` and `smd_full_to_gaa.py` |
+| Table 2, probe results (mean and standard deviation over three seeds) | `per_encoder` entries of the `probe_compare.py` outputs |
+| Figure 2, simulator-to-real gap | `tables/fig_gap_rev.py` |
+| Tables 3 and 5, paired differences with 95% intervals | `tables/pooled_boot.py main` |
+| Comparisons with the untouched CLIP encoder | `tables/pooled_boot.py stock` |
+| Table 4, attention overlap | `eval_attn_mp.py`, `tables/attagg.py` |
+| Supplement, per-seed paired differences | `probe_compare.py`, `tables/pagg.py` |
+| Supplement, detection probe | `eval_det_probe.py`, `det_compare.py`, `tables/dagg.py` |
+| Supplement, YOLOv8s reference | `yolo_ref.py`, `tables/yolo_ap.py` |
+| Supplement, texture and shape cue test | `make_cue_sets.py`, `tables/cue_sub.py` |
+| Supplement, VLM study | `build_vlm_sft_v2.py`, `train.py`, `yesno_eval.py`, `yesno_rescore.py` (SMD), `verify_s2_compare.py`, `tables/vlmagg.py`, `tables/vlmtab.py` |
+| Supplement, predicted occupancy maps | `fig_occupancy.py --smd_json` |
+
+`tables/pooled_boot.py` computes each paired difference as the mean of the three per-seed differences. Its 95% interval comes from 1,000 bootstrap draws over resampling units, and each draw is applied to all three seeds.
+
+## Citation
+
+```bibtex
+@inproceedings{Lee2027Sim2Tok,
+  author    = {Lee, Young-Woon and Cho, Changsik and Kim, Byung-Gyu},
+  title     = {Where Simulator Geometry Should Enter a Vision-Language Encoder: Token Supervision Narrows the Maritime Sim-to-Real Gap},
+  booktitle = {Proceedings of the IEEE/CVF Winter Conference on Applications of Computer Vision (WACV) Workshops},
+  year      = {2027}
+}
 ```
-
-Key flags:
-
-| flag | meaning |
-|------|---------|
-| `--geo_variant` | `inbox_ce` (recommended) / `bg_l2` / `inbox_mass` / `fg_bg_margin` |
-| `--geo_loss_weight` | lambda for `L_total = L_SFT + lambda * L_geo` |
-| `--privileged_mode` | `attn_loss` (GAA) or `input_crop` (box-guided crop control) |
-| `--init_vision_ckpt` / `--freeze_vision` | load a geo-trained encoder and realign projector/LoRA only |
-
-The GAA-trained CLIP weights are saved to `vision_encoder.bin` in the output
-dir (required so the attention alignment is preserved at evaluation time).
-
-Multi-GPU: `bash scripts/train_lora_gaa.sh` (DeepSpeed; see `scripts/zero*.json`).
-
----
-
-## Evaluation
-
-```bash
-# Attention alignment (encoder-only; stock vs trained encoders)
-python gaa/evaluate_attn.py --data_path data/smd_onshore.json --image_dir /path/to/frames \
-    --gaa_ckpt checkpoints/gaa_inbox_ce/vision_encoder.bin
-
-# Loss-variant study (vision-only; cross-domain transfer via --test_data_path)
-python gaa/loss_study.py --data_path data/train.json --image_dir / \
-    --test_data_path data/smd_onshore.json --test_image_dir /path/to/frames \
-    --variants bg_l2,inbox_ce --steps 200
-
-# Texture-bias decomposition (H0): vessel% vs sea% vs sky% (needs SMD HorizonGT)
-python gaa/texture_bias_eval.py --smd_root /path/to/SMD --split VIS_Onshore \
-    --ckpts stock=stock,GAA=checkpoints/gaa_inbox_ce/vision_encoder.bin
-
-# Attention-grounded detection (mAP@50 + FP/image)
-python gaa/detect_eval.py --data_path data/smd_onshore.json --image_dir /path/to/frames \
-    --ckpts stock,checkpoints/gaa_inbox_ce/vision_encoder.bin
-
-# Per-sample attention heatmaps
-python gaa/attn_visualize.py --data_path data/smd_onshore.json --image_dir /path/to/frames \
-    --out_dir viz/ --ckpts "stock=stock,GAA=checkpoints/gaa_inbox_ce/vision_encoder.bin"
-```
-
----
-
-## Multi-VLM maritime benchmark
-
-Zero-shot comparison across 11 open VLM families (Qwen2-VL, Qwen2.5-VL,
-LLaVA-1.5, LLaVA-NeXT, InternVL3, Idefics2, SmolVLM, PaliGemma, Llama-3.2-Vision,
-Aya-Vision, Gemma-3). Gated models require an accepted HF license + token.
-
-```bash
-python gaa/vlm_behavior_eval.py --model qwen2.5-vl --num 100   # one model
-bash gaa/run_vlm_sweep.sh                                      # full sweep (sequential, resumable)
-```
-
-Metrics: `vessel_recall` (detection), `halluc_rate` (POPE-style false-positive
-on absent objects), `colreg_acc` (head-on / crossing / overtaking / safe).
-
----
 
 ## License
 

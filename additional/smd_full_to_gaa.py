@@ -64,26 +64,41 @@ def condition_of(split: str, stem: str) -> str:
     return "VIS_Clear"
 
 
-def load_object_gt(mat_path: str) -> list[np.ndarray]:
-    """Per-frame ``(N, 4)`` ``[x, y, w, h]`` pixel boxes from an ObjectGT file.
+# SMD ObjectGT class ids, read from the numeric ``Object`` field.  The string
+# ``ObjectType`` field is inconsistent in the published archives (empty or
+# disagreeing entries), so the id is authoritative.  Counts over VIS_Onshore and
+# NIR: 1 Ferry, 2 Buoy, 3 Vessel/ship, 4 Speed boat, 5 Boat, 6 Kayak,
+# 7 Sail boat, 9 Flying bird/plane, 10 Other (id 8, swimming person, does not
+# occur; one box has id 0).
+SMD_CLASSES = {1: "Ferry", 2: "Buoy", 3: "Vessel/ship", 4: "Speed boat", 5: "Boat",
+               6: "Kayak", 7: "Sail boat", 8: "Swimming person",
+               9: "Flying bird/plane", 10: "Other"}
+SMD_VESSEL_IDS = (1, 3, 4, 5, 6, 7)
 
-    The boxes live in the ``BB`` field of the ``structXML`` struct array.  The
-    sibling ``Object`` field is a per-object class id, not a box; reading it as
-    geometry is the mistake ``gaa/smd_to_gaa.py`` documents.
+
+def load_object_gt(mat_path: str) -> list[tuple[np.ndarray, np.ndarray]]:
+    """Per-frame ``(N, 4)`` ``[x, y, w, h]`` pixel boxes and their ``(N,)`` class ids.
+
+    The boxes live in the ``BB`` field of the ``structXML`` struct array and the
+    class ids in the sibling ``Object`` field.  Reading ``Object`` as geometry
+    is the mistake ``gaa/smd_to_gaa.py`` documents.
     """
     import scipy.io as sio
 
     m = sio.loadmat(mat_path, struct_as_record=False, squeeze_me=True)
-    frames: list[np.ndarray] = []
+    frames: list[tuple[np.ndarray, np.ndarray]] = []
     for fr in np.atleast_1d(m["structXML"]):
         bb = getattr(fr, "BB", None)
         if bb is None or np.size(bb) == 0:
-            frames.append(np.zeros((0, 4)))
+            frames.append((np.zeros((0, 4)), np.zeros((0,), dtype=int)))
             continue
         bb = np.atleast_2d(np.asarray(bb, dtype=float))
         if bb.shape[1] != 4 and bb.shape[0] == 4:      # tolerate a transposed store
             bb = bb.T
-        frames.append(bb)
+        cls = np.atleast_1d(np.asarray(getattr(fr, "Object", []), dtype=int))
+        if len(cls) != len(bb):
+            raise ValueError(f"{mat_path}: {len(bb)} boxes but {len(cls)} class ids")
+        frames.append((bb, cls))
     return frames
 
 
@@ -95,9 +110,13 @@ def find_video(videos_dir: str, stem: str) -> str | None:
     return None
 
 
-def _normalise(bb: np.ndarray, w: int, h: int) -> list[list[float]]:
+def _normalise(bb: np.ndarray, w: int, h: int, cls: np.ndarray | None = None,
+               keep: set[int] | None = None) -> list[list[float]]:
+    """Normalised ``[x1, y1, x2, y2]`` boxes, optionally only those whose class id is in ``keep``."""
     boxes: list[list[float]] = []
-    for b in bb:
+    for k, b in enumerate(bb):
+        if keep is not None and int(cls[k]) not in keep:
+            continue
         x, y, bw, bh = (float(b[0]), float(b[1]), float(b[2]), float(b[3]))
         if bw <= 0 or bh <= 0:
             continue
@@ -112,7 +131,7 @@ def _normalise(bb: np.ndarray, w: int, h: int) -> list[list[float]]:
 
 def convert_video(args_tuple) -> dict:
     """Decode one video and write every labelled frame. Runs in a worker process."""
-    split, mat_path, videos_dir, out_images, write_images = args_tuple
+    split, mat_path, videos_dir, out_images, write_images, vessel_ids = args_tuple
     import cv2
 
     stem = os.path.basename(mat_path).replace("_ObjectGT.mat", "")
@@ -146,11 +165,16 @@ def convert_video(args_tuple) -> dict:
         ok, frame = cap.read()
         if not ok:
             break
-        bb = frames_gt[idx]
+        bb, cls = frames_gt[idx]
         if np.size(bb):
             h, w = frame.shape[:2]
-            boxes = _normalise(np.atleast_2d(np.asarray(bb, dtype=float)), w, h)
-            if boxes:
+            bb = np.atleast_2d(np.asarray(bb, dtype=float))
+            # A frame is kept when it carries any valid annotation, so the image
+            # set does not depend on the class filter.  Only vessel classes go
+            # into ``bboxes``; the rest are kept apart as ``other_boxes``.
+            if _normalise(bb, w, h):
+                other = set(int(c) for c in cls) - set(vessel_ids)
+                boxes = _normalise(bb, w, h, cls, set(vessel_ids))
                 name = f"{stem}_f{idx:05d}.png"
                 if write_images:
                     path = os.path.join(out_dir, name)
@@ -160,6 +184,8 @@ def convert_video(args_tuple) -> dict:
                     "id": f"{stem}_f{idx}",
                     "image": os.path.join(split, name),
                     "bboxes": boxes,
+                    "other_boxes": _normalise(bb, w, h, cls, other),
+                    "vessel_labelled": True,
                     "split": split,
                     "video": stem,
                     "frame": idx,
@@ -182,6 +208,8 @@ def parse_args():
     p.add_argument("--no_images", action="store_true",
                    help="build the JSON only (frames must already exist)")
     p.add_argument("--stats_json", default=None)
+    p.add_argument("--vessel_ids", default=",".join(map(str, SMD_VESSEL_IDS)),
+                   help="ObjectGT class ids counted as vessels")
     return p.parse_args()
 
 
@@ -205,7 +233,8 @@ def main():
         print(f"[smd] {split}: {len(mats)} ObjectGT / {n_videos} videos")
         for mat in mats:
             jobs.append((split, mat, vid_dir, args.out_images,
-                         not args.no_images))
+                         not args.no_images,
+                         tuple(int(x) for x in args.vessel_ids.split(","))))
 
     if not jobs:
         raise SystemExit("[smd] nothing to convert")
@@ -236,7 +265,10 @@ def main():
     stats = {
         "splits": args.split,
         "n_samples": len(samples),
+        "vessel_ids": args.vessel_ids,
         "n_boxes": sum(len(s["bboxes"]) for s in samples),
+        "n_other_boxes": sum(len(s["other_boxes"]) for s in samples),
+        "n_vessel_free": sum(1 for s in samples if not s["bboxes"]),
         "n_videos": len(per_video),
         "by_split": dict(Counter(s["split"] for s in samples)),
         "by_condition": dict(Counter(s["condition"] for s in samples)),

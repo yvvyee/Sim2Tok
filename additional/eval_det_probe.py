@@ -232,6 +232,8 @@ def main():
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--eval_only", action="store_true",
                    help="load det_head.bin from out_dir and only evaluate")
+    p.add_argument("--skip_sim_val", action="store_true",
+                   help="evaluate the --real sets only")
     args = p.parse_args()
 
     distributed = "RANK" in os.environ and int(os.environ.get("WORLD_SIZE", 1)) > 1
@@ -309,7 +311,7 @@ def main():
     if rank == 0 and not args.eval_only:
         torch.save(head.state_dict(), os.path.join(args.out_dir, "det_head.bin"))
 
-    sets = [("aivn_val", sim_items(args, "val"))]
+    sets = [] if args.skip_sim_val else [("aivn_val", sim_items(args, "val"))]
     for spec in args.real:
         name, rest = spec.split("=", 1)
         jp, idir = rest.rsplit(":", 1)

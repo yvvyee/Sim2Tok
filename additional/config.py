@@ -22,11 +22,26 @@ from dataclasses import dataclass, field
 
 # ── GPU policy ───────────────────────────────────────────────────────────────
 
-#: Physical GPU indices this study is allowed to use.
-CUDA_DEVICES: tuple[int, ...] = (2, 3, 4, 5)
+#: Allowed and reserved physical GPU indices per host.  TG-A40G (six
+#: A100-PCIE-40GB) runs the study on cards 2-5 and reserves 0 and 1 for other
+#: users.  TG-A80G (two A100 80GB PCIe) was assigned to this study with both
+#: cards on 2026-11-02 for the SMD re-evaluation.  An unlisted host gets an
+#: empty allowed set, so importing this module still works there (data
+#: preparation needs no GPU) but every GPU launch is refused.
+HOST_POLICY: dict[str, tuple[tuple[int, ...], frozenset[int]]] = {
+    "tg-a40g": ((2, 3, 4, 5), frozenset({0, 1})),
+    "tg-a80g": ((0, 1), frozenset()),
+}
 
+
+def _host_policy() -> tuple[tuple[int, ...], frozenset[int]]:
+    import socket
+    return HOST_POLICY.get(socket.gethostname().lower(), ((), frozenset()))
+
+
+#: Physical GPU indices this study is allowed to use on this host.
 #: Physical GPU indices reserved for other users.  Never schedule work here.
-RESERVED_DEVICES: frozenset[int] = frozenset({0, 1})
+CUDA_DEVICES, RESERVED_DEVICES = _host_policy()
 
 
 def cuda_visible_devices(devices: tuple[int, ...] | None = None) -> str:
@@ -37,7 +52,9 @@ def cuda_visible_devices(devices: tuple[int, ...] | None = None) -> str:
     """
     devs = tuple(devices) if devices is not None else CUDA_DEVICES
     if not devs:
-        raise ValueError("empty device list")
+        import socket
+        raise ValueError(f"no GPU is allowed on host {socket.gethostname()!r}; "
+                         f"add it to config.HOST_POLICY")
     bad = sorted(set(devs) & RESERVED_DEVICES)
     if bad:
         raise ValueError(

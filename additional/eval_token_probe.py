@@ -140,6 +140,10 @@ def main():
     p.add_argument("--center_pos_weight", type=float, default=50.0)
     p.add_argument("--num_workers", type=int, default=8)
     p.add_argument("--seed", type=int, default=0)
+    p.add_argument("--init_head", default=None,
+                   help="evaluate a saved probe_head.bin instead of training a new head")
+    p.add_argument("--skip_sim_val", action="store_true",
+                   help="evaluate the --real sets only (the count threshold comes from the saved aivn_val run)")
     args = p.parse_args()
 
     distributed = "RANK" in os.environ and int(os.environ.get("WORLD_SIZE", 1)) > 1
@@ -191,6 +195,11 @@ def main():
         os.makedirs(args.out_dir, exist_ok=True)
         print(f"[probe] {label}: head on {len(train):,} sim train images, "
               f"{args.head_steps} steps, batch {world * args.per_device_batch}", flush=True)
+    if args.init_head:
+        head.load_state_dict(torch.load(args.init_head, map_location=device))
+        step = args.head_steps
+        if rank == 0:
+            print(f"[probe] {label}: loaded head {args.init_head}, training skipped", flush=True)
     while step < args.head_steps:
         if sampler is not None:
             sampler.set_epoch(epoch)
@@ -207,11 +216,11 @@ def main():
                 break
         epoch += 1
     head.eval()
-    if rank == 0:
+    if rank == 0 and not args.init_head:
         torch.save(head.state_dict(), os.path.join(args.out_dir, "probe_head.bin"))
 
     # ── evaluation ──
-    sets = [("aivn_val", sim_items(args, "val"))]
+    sets = [] if args.skip_sim_val else [("aivn_val", sim_items(args, "val"))]
     for spec in args.real:
         name, rest = spec.split("=", 1)
         jp, idir = rest.rsplit(":", 1)

@@ -282,6 +282,15 @@ def main():
             # the gather forever.  With a timeout the rank raises, torchrun
             # fails the job, and the queue retries it.
             timeout=args.loader_timeout if args.num_workers > 0 else 0,
+            # Workers are started with spawn, not fork.  By the time the loader
+            # starts, the rank already runs NCCL watchdog/heartbeat, CUDA event,
+            # pin-memory and jemalloc background threads (jemalloc is pulled in
+            # by pyarrow).  A fork copies whatever lock one of those threads
+            # holds at that instant, and the single-threaded child then waits
+            # on it forever: on 2026-10-13 the stuck worker had one thread
+            # sleeping in futex_wait while its parent had 17.  Spawned workers
+            # start from a fresh interpreter and inherit no lock state.
+            multiprocessing_context="spawn" if args.num_workers > 0 else None,
         )
 
         records: list[dict] = []

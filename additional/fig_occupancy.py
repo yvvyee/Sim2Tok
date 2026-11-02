@@ -7,7 +7,7 @@ vessel covering at least half a patch cell).  Each encoder's seed-0 probe head
 from ``eval_token_probe`` predicts token occupancy on the frozen layer-23
 tokens.  Runs on CPU.
 
-    CUDA_VISIBLE_DEVICES= python -m additional.fig_occupancy --out fig_occ.png
+    CUDA_VISIBLE_DEVICES= python -m additional.fig_occupancy --out fig_occ.png [--smd_json PATH]
 """
 from __future__ import annotations
 
@@ -31,10 +31,12 @@ SETS = [("MCAD-RGB", f"{ROOT}/data/real/mcad_rgb.json", REAL),
         ("MCAD-IR", f"{ROOT}/data/real/mcad_ir.json", REAL),
         ("LaRS", f"{ROOT}/data/real/lars.json", REAL),
         ("SeaDronesSee", f"{ROOT}/data/real/seadronessee.json", REAL),
-        ("SMD", f"{ROOT}/data/smd_full.json", f"{ROOT}/frames")]
-ENC = [("CLIP", "none", "stock_s0"),
-       ("GAA", f"{ROOT}/checkpoints/crop_n10000_s0/vision_encoder.bin", "gaa_s0"),
-       ("Token occ. (ours)", f"{ROOT}/checkpoints/tok_occ_s0/vision_encoder.bin", "tok_occ_s0")]
+        ("SMD", None, f"{ROOT}/frames")]   # json from --smd_json
+# Encoders of the revision protocol (training split only).  GAA is the
+# variant matched to token occupancy in data and steps.
+ENC = [("CLIP", "none", "rev_stock_s0"),
+       ("GAA", f"{ROOT}/checkpoints/rev/rev_gaam_s0/vision_encoder.bin", "rev_gaam_s0"),
+       ("Token occ. (ours)", f"{ROOT}/checkpoints/rev/rev_tok_s0/vision_encoder.bin", "rev_tok_s0")]
 
 
 def pick(json_path):
@@ -51,10 +53,12 @@ def pick(json_path):
 def main():
     p = argparse.ArgumentParser()
     p.add_argument("--out", required=True)
+    p.add_argument("--smd_json", default=f"{ROOT}/data/smd_vessel.json",
+                   help="SMD labels with vessel classes only (smd_full_to_gaa.py)")
     args = p.parse_args()
     from transformers import CLIPImageProcessor, CLIPVisionModel
     proc = CLIPImageProcessor.from_pretrained("openai/clip-vit-large-patch14-336")
-    picks = [(n, *pick(j), d) for n, j, d in SETS]
+    picks = [(n, *pick(j or args.smd_json), d) for n, j, d in SETS]
     pvs = []
     for n, r, vis, d in picks:
         img = Image.open(os.path.join(d, r["image"])).convert("RGB")
@@ -67,7 +71,7 @@ def main():
             enc.load_state_dict(torch.load(path, map_location="cpu"), strict=False)
         enc.eval()
         head = ProbeHead(enc.config.hidden_size, [])
-        head.load_state_dict(torch.load(f"{ROOT}/results/probe/{probe}/probe_head.bin", map_location="cpu"))
+        head.load_state_dict(torch.load(f"{ROOT}/results/rev_probe/{probe}/probe_head.bin", map_location="cpu"))
         head.eval()
         with torch.no_grad():
             tok = enc(pixel_values=pv, output_hidden_states=True).hidden_states[-2][:, 1:, :]
